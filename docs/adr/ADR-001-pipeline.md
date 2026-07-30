@@ -1,25 +1,25 @@
-# ADR-001: Core log pipeline and component boundaries
+# ADR-001：核心日志管道与组件边界
 
-- Status: Accepted
-- Date: 2026-07-30
+- 状态：已接受
+- 日期：2026-07-30
 
-## Context
+## 背景
 
-The source requirement sends Kubernetes logs through Filebeat and Kafka to
-Elasticsearch, but it does not identify who consumes Kafka. It also allows an
-optional Go query layer for Grafana. Leaving both gaps open would either break
-the data path or add duplicate services.
+原始需求要求 Kubernetes 日志经由 Filebeat 和 Kafka 进入
+Elasticsearch，但没有明确由谁消费 Kafka。它还允许为 Grafana
+增加可选的 Go 查询层。如果这两个问题都不作决定，数据链路会无法闭合，
+或者项目会增加职责重复的服务。
 
-The local project must remain small, teach the purpose of Kafka and include a
-meaningful Go service without adopting production-scale infrastructure.
+本地项目必须保持精简，体现 Kafka 的作用，并包含一个有实质职责的 Go
+服务，同时不引入生产规模的基础设施。
 
-## Decision
+## 决策
 
-Use this fixed `v0.1.0` flow:
+`v0.1.0` 固定采用以下流程：
 
 ```text
-Pod stdout
-  → node container log file
+Pod 标准输出
+  → 节点容器日志文件
   → Filebeat DaemonSet
   → Kafka logs.<service>
   → Go log-processor
@@ -27,89 +27,83 @@ Pod stdout
   → Grafana
 ```
 
-Component boundaries:
+组件边界如下：
 
-1. `demo-app` only emits predictable JSON to stdout. It never writes Kafka or
-   Elasticsearch directly.
-2. Filebeat collects only the target namespace/workloads, excludes its own and
-   infrastructure logs, enriches Kubernetes metadata and routes by an
-   allowlisted Pod `service` label. It performs no business aggregation and
-   never writes Elasticsearch.
-3. Kafka buffers and decouples collection from processing. It is not long-term
-   search storage.
-4. Go `log-processor` is the only Kafka-to-Elasticsearch business path. It
-   validates, normalizes, derives the event ID and writes Elasticsearch.
-5. Elasticsearch owns indexing and aggregation. It is not a message queue.
-6. Grafana queries Elasticsearch directly and does not store primary log data.
-   A Go query API requires a later, accepted requirement.
+1. `demo-app` 只向标准输出产生可预测的 JSON，绝不直接写入 Kafka 或
+   Elasticsearch。
+2. Filebeat 只采集目标命名空间和工作负载，排除自身及基础设施日志，
+   补充 Kubernetes 元数据，并依据允许列表中的 Pod `service` 标签进行
+   路由。它不做业务聚合，也绝不写入 Elasticsearch。
+3. Kafka 负责缓冲，并将采集与处理解耦；它不是长期检索存储。
+4. Go `log-processor` 是 Kafka 到 Elasticsearch 的唯一业务处理路径，
+   负责校验、规范化、生成事件 ID 并写入 Elasticsearch。
+5. Elasticsearch 负责索引和聚合；它不是消息队列。
+6. Grafana 直接查询 Elasticsearch，不保存日志主数据。若要增加 Go
+   查询接口，必须先有后续被接受的需求。
 
-For the initial acceptance dataset:
+初始验收数据集采用以下约定：
 
-- the same demo image is deployed as `demo-api` and `demo-worker`;
-- topics are `logs.demo-api` and `logs.demo-worker`;
-- each business topic has three partitions and replication factor one;
-- stable Pod UID is the partition key;
-- unknown or missing service labels go only to fixed
-  `logs.unclassified`, never to dynamically constructed topics.
+- 同一个演示镜像分别部署为 `demo-api` 和 `demo-worker`；
+- 主题为 `logs.demo-api` 和 `logs.demo-worker`；
+- 每个业务主题有三个分区，副本因子为 1；
+- 使用稳定的 Pod UID 作为分区键；
+- 未知或缺失的服务标签只能进入固定的 `logs.unclassified`，绝不据此动态
+  创建主题。
 
-Three partitions per service permit a later consumer-scaling experiment without
-changing the initial topic contract. Replication factor one is explicitly a
-single-node development choice, not a high-availability claim.
+每个服务使用三个分区，可以在不改变初始主题契约的情况下开展后续消费者扩容
+实验。副本因子为 1 是明确的单节点开发选择，不代表
+系统具备高可用。
 
-`log-processor` subscribes only to the explicit business-topic allowlist; it
-does not consume `logs.unclassified` or `logs.dlq`. The fallback topic's message
-count and sampled records are the observable rejection evidence for invalid
-routing labels.
+`log-processor` 只订阅明确列入允许列表的业务主题，不消费
+`logs.unclassified` 或 `logs.dlq`。回退主题的消息数量和抽样记录，
+是拒绝无效路由标签的可观测证据。
 
-## Consequences
+## 后果
 
-### Positive
+### 正面影响
 
-- The required pipeline is closed end to end.
-- Kafka has a clear buffering and replay role.
-- The Go service owns meaningful distributed-system behavior.
-- Grafana provisioning stays simple and avoids a duplicate query model.
-- Controlled topic names prevent label values from creating unbounded topics.
+- 必需的数据管道可以端到端闭合。
+- Kafka 具有清晰的缓冲和重放职责。
+- Go 服务承担有实质意义的分布式系统行为。
+- Grafana 预置保持简单，避免重复的查询模型。
+- 受控的主题名称可防止标签值创建无限数量的主题。
 
-### Negative
+### 负面影响
 
-- The processor must handle Kafka offsets, retries, poison messages and
-  Elasticsearch partial failures.
-- Grafana is coupled to the Elasticsearch mapping in `v0.1.0`.
-- Single-node Kafka and Elasticsearch cannot demonstrate node-level high
-  availability.
-- A fixed fallback topic requires explicit monitoring and cleanup.
+- 处理器必须处理 Kafka 偏移量、重试、毒消息和 Elasticsearch
+  部分失败。
+- 在 `v0.1.0` 中，Grafana 与 Elasticsearch 映射耦合。
+- 单节点 Kafka 和 Elasticsearch 无法证明节点级高可用。
+- 固定回退主题需要明确的监控和清理。
 
-## Rejected alternatives
+## 已拒绝的替代方案
 
-- **Filebeat → Elasticsearch directly:** rejects Kafka and bypasses the required
-  Go processing path.
-- **`demo-app` writes Kafka or Elasticsearch directly:** couples the producer to
-  infrastructure and bypasses node-level collection evidence.
-- **Add Logstash:** duplicates the processor role and weakens the Go learning
-  objective.
-- **Go query API in `v0.1.0`:** duplicates Grafana/Elasticsearch querying
-  without a current authorization or isolation requirement.
-- **Topic name from arbitrary label text:** risks topic explosion and makes
-  routing acceptance non-deterministic.
-- **One topic for every log:** removes the required per-service routing
-  evidence.
-- **Elasticsearch as a queue or Kafka as long-term search:** assigns durability
-  and query responsibilities to the wrong component.
-- **Production multi-node Kafka/Elasticsearch now:** exceeds the local learning
-  scope; it is not implied by the single-node recovery tests.
+- **Filebeat 直接写入 Elasticsearch：**这会去掉 Kafka，并绕过必需的
+  Go 处理路径。
+- **`demo-app` 直接写入 Kafka 或 Elasticsearch：**这会让生产者与
+  基础设施耦合，并绕过节点级采集证据。
+- **增加 Logstash：**这会重复处理器的职责，并削弱 Go 学习目标。
+- **在 `v0.1.0` 中增加 Go 查询接口：**当前没有授权或隔离需求，这会与
+  Grafana/Elasticsearch 查询重复。
+- **直接用任意标签文本生成主题名称：**这会造成主题爆炸，并让路由
+  验收失去确定性。
+- **所有日志共用一个主题：**这会失去按服务路由的必要证据。
+- **将 Elasticsearch 用作队列，或将 Kafka 用作长期检索：**这会把持久化
+  和查询职责分配给错误的组件。
+- **现在就部署生产级多节点 Kafka/Elasticsearch：**这超出本地学习范围，
+  单节点恢复测试也不能推出这种能力。
 
-## Validation obligations
+## 验证义务
 
-- `demo-api` and `demo-worker` each emit 20 numbered events with one unique
-  `test_run_id`.
-- A temporary Kafka consumer observes all 20 expected unique sequence numbers
-  in the correct service topic, with no cross-routing or Filebeat recursion.
-- A missing or unknown service label reaches only `logs.unclassified`; it
-  creates no arbitrary topic and is not consumed by the normal processor.
-- No manual write to Elasticsearch is needed for demo events to arrive.
-- For one fixed `test_run_id`, N logical unique inputs produce N unique
-  Elasticsearch documents and are queryable through the provisioned Grafana
-  path within the declared test boundary.
-- Grafana views use the same Elasticsearch source and can be restored from
-  repository provisioning files.
+- `demo-api` 和 `demo-worker` 各自使用一个唯一 `test_run_id`，分别产生
+  20 条带编号的事件。
+- 临时 Kafka 消费者能在正确的服务主题中观察到全部 20 个预期的唯一序号，
+  且不存在跨主题路由或 Filebeat 递归采集。
+- 缺失或未知服务标签的事件只进入 `logs.unclassified`，不会创建任意
+  主题，也不会被正常处理器消费。
+- 演示事件无需人工写入 Elasticsearch 即可到达。
+- 对一个固定的 `test_run_id`，在声明的测试边界内，N 个逻辑唯一输入产生
+  N 个 Elasticsearch 唯一文档，并可通过已预置的 Grafana
+  路径查询。
+- Grafana 视图使用同一个 Elasticsearch 数据源，并可从仓库中的
+  预置文件恢复。

@@ -1,190 +1,176 @@
-# Architecture
+# 架构
 
-- Status: Day 1 baseline
-- Updated: 2026-07-30
-- Deployment target: WSL2 Minikube profile `stage3-logs`
+- 状态：第 1 天基线
+- 更新日期：2026-07-30
+- 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
-## 1. Goals and constraints
+## 1. 目标与约束
 
-The platform must close the log path from Kubernetes Pod stdout to searchable
-and visualized events while remaining small enough for a single-node local
-cluster.
+平台必须打通从 Kubernetes Pod 标准输出到可检索、可视化事件的日志链路，
+同时将规模控制在单节点本地集群能够承载的范围内。
 
-The baseline preserves these invariants:
+本基线保持以下不变量：
 
-- UC-001 and UC-002 are mandatory for `v0.1.0`.
-- Kafka separates collection from processing.
-- Go `log-processor` is the only Kafka-to-Elasticsearch business path.
-- Grafana queries Elasticsearch directly in `v0.1.0`.
-- Delivery is at least once; deterministic IDs make Elasticsearch writes
-  idempotent.
-- All manifests must be reproducible from the repository. Business workloads
-  and data must remain scoped to `stage3-logs`; any required Filebeat host
-  access or cluster-level read-only RBAC must be minimized, listed explicitly
-  and verified before acceptance.
+- UC-001 和 UC-002 是 `v0.1.0` 的必做用例。
+- Kafka 将采集与处理解耦。
+- Go `log-processor` 是 Kafka 到 Elasticsearch 的唯一业务处理路径。
+- `v0.1.0` 中 Grafana 直接查询 Elasticsearch。
+- 投递语义为至少一次；确定性 ID 使 Elasticsearch 写入具备幂等性。
+- 所有清单都必须能从仓库复现。业务工作负载和数据必须限定在
+  `stage3-logs` 中；任何必要的 Filebeat 宿主机访问或集群级只读权限
+  都必须最小化、明确列出，并在验收前验证。
 
-## 2. System context and core flow
+## 2. 系统上下文与核心链路
 
 ```mermaid
 flowchart LR
-    A["demo-app Pods<br/>stdout JSON"]
-    N["Kubernetes node<br/>container log files"]
-    F["Filebeat DaemonSet<br/>collect + enrich"]
+    A["demo-app Pod<br/>标准输出 JSON"]
+    N["Kubernetes 节点<br/>容器日志文件"]
+    F["Filebeat DaemonSet<br/>采集 + 补充元数据"]
     K[("Kafka<br/>logs.&lt;service&gt;")]
-    P["Go log-processor<br/>validate + normalize + ID"]
+    P["Go log-processor<br/>校验 + 规范化 + ID"]
     E[("Elasticsearch<br/>logs-stage3-*")]
-    G["Grafana<br/>search + aggregate + drill down"]
+    G["Grafana<br/>检索 + 聚合 + 下钻"]
 
     A --> N --> F --> K --> P --> E --> G
 ```
 
-`demo-api` and `demo-worker` use the same `demo-app` image. A controlled Pod
-`service` label selects `logs.demo-api` or `logs.demo-worker`; the normalized
-event field is `service.name`.
+`demo-api` 和 `demo-worker` 使用同一个 `demo-app` 镜像。受控的 Pod
+`service` 标签用于选择 `logs.demo-api` 或 `logs.demo-worker`；规范化后的
+事件字段为 `service.name`。
 
-## 3. Component responsibilities
+## 3. 组件职责
 
-| Component | Kubernetes form | Owns | Must not own |
+| 组件 | Kubernetes 形态 | 职责 | 不承担的职责 |
 |---|---|---|---|
-| `demo-app` | Two Deployments | Predictable numbered JSON logs | Kafka or Elasticsearch clients |
-| Filebeat | DaemonSet | Node log collection, Kubernetes enrichment, controlled topic routing | Business transformation or direct Elasticsearch writes |
-| Kafka | Single-node StatefulSet | Short buffering, per-service topics, replay boundary | Long-term search |
-| `log-processor` | Deployment | Consume, validate, normalize, derive `event_id`, write Elasticsearch | General query API |
-| Elasticsearch | Single-node StatefulSet | Indexing, full-text search, time/service/level aggregation | Queue semantics |
-| Grafana | Deployment | Search UI, aggregation panels, drill-down | Primary log storage |
+| `demo-app` | 两个 Deployment | 产生可预测、带编号的 JSON 日志 | Kafka 或 Elasticsearch 客户端 |
+| Filebeat | DaemonSet | 节点日志采集、补充 Kubernetes 元数据、受控的主题路由 | 业务转换或直接写入 Elasticsearch |
+| Kafka | 单节点 StatefulSet | 短时缓冲、按服务划分主题、提供重放边界 | 长期检索 |
+| `log-processor` | Deployment | 消费、校验、规范化、生成 `event_id`、写入 Elasticsearch | 通用查询接口 |
+| Elasticsearch | 单节点 StatefulSet | 索引、全文检索、按时间/服务/级别聚合 | 消息队列语义 |
+| Grafana | Deployment | 检索界面、聚合面板、下钻 | 日志主存储 |
 
-Prometheus, metrics-server integration, HPA and Alertmanager are deferred until
-the UC-001/UC-002 acceptance path is green.
+Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
+UC-001/UC-002 验收链路全绿之后。
 
-## 4. Kubernetes topology
+## 4. Kubernetes 拓扑
 
-- Profile: `stage3-logs`, Docker driver, containerd runtime.
-- Verified outer limit: 4 CPU and 6 GiB memory.
-- Namespace: `stage3-logs`.
-- Configuration: Kustomize base plus a local overlay; no Helm.
-- Services: infrastructure defaults to `ClusterIP`; local UI access uses
-  temporary `kubectl port-forward`.
-- Stateful components: Kafka and Elasticsearch use one replica and development
-  storage. This is not a production high-availability topology.
-- `demo-app` and `log-processor`: readiness/liveness probes, resource
-  requests/limits, graceful termination and non-root execution.
-- Third-party images: security contexts are tightened only after the selected
-  image behavior is verified; exceptions must be documented.
-- Filebeat mounts only the required host log and registry paths, uses an
-  allowlist for target workloads, and excludes its own and infrastructure logs.
-- Filebeat may require hostPath access and cluster-level read-only metadata
-  permissions; these are not permission to mutate resources outside the
-  project namespace.
+- Minikube 配置实例：`stage3-logs`，Docker 驱动，containerd 运行时。
+- 已验证的外层限制：4 CPU、6 GiB 内存。
+- 命名空间：`stage3-logs`。
+- 配置方式：Kustomize 基础配置加本地叠加配置（`base` + `overlay`）；
+  不使用 Helm。
+- 服务：基础设施默认使用 `ClusterIP`；本地界面访问使用临时
+  `kubectl port-forward`。
+- 有状态组件：Kafka 和 Elasticsearch 都使用单副本和开发级存储。
+  这不是生产级高可用拓扑。
+- `demo-app` 和 `log-processor`：配置就绪/存活探针、资源请求/限制、
+  优雅终止，并以非根用户运行。
+- 第三方镜像：只有在验证所选镜像行为后才收紧安全上下文；例外情况必须记录。
+- Filebeat 只挂载必要的宿主机日志路径和 `registry` 路径，使用目标工作负载
+  允许列表，并排除自身及基础设施日志。
+- Filebeat 可能需要 `hostPath` 访问和集群级只读元数据权限；这些权限不允许
+  修改项目命名空间之外的资源。
 
-The complete stack must leave headroom inside the outer 4 CPU/6 GiB limit.
-Kafka and Elasticsearch use small development heaps, single replicas and short
-retention. Exact requests, limits and heap values are accepted only after a
-component smoke test; they are not guessed in this baseline.
+完整技术栈必须在外层 4 CPU、6 GiB 限制内保留余量。Kafka 和
+Elasticsearch 使用小型开发堆内存、单副本和短保留期。具体资源请求、限制和
+堆内存值只有通过组件冒烟测试后才能采纳，本基线不凭猜测填写。
 
-## 5. Topics, indexes and query path
+## 5. 主题、索引与查询路径
 
 ### Kafka
 
-| Topic | Partitions | Replication factor | Purpose |
+| 主题 | 分区数 | 复制因子 | 用途 |
 |---|---:|---:|---|
-| `logs.demo-api` | 3 | 1 | `demo-api` events |
-| `logs.demo-worker` | 3 | 1 | `demo-worker` events |
-| `logs.unclassified` | 1 | 1 | Fixed fallback for unknown or missing service labels |
-| `logs.dlq` | 1 | 1 | Permanently invalid events and processing evidence |
+| `logs.demo-api` | 3 | 1 | `demo-api` 事件 |
+| `logs.demo-worker` | 3 | 1 | `demo-worker` 事件 |
+| `logs.unclassified` | 1 | 1 | 未知或缺失服务标签的固定兜底主题 |
+| `logs.dlq` | 1 | 1 | 永久无效事件和处理证据 |
 
-The partition key is the stable Pod UID for known services. Unknown labels
-cannot create arbitrary topic names. Initial retention is short and local-only;
-the exact duration is pinned with the Kafka manifest after its compatibility
-smoke test.
+已知服务使用稳定的 Pod UID 作为分区键。未知标签不能创建任意主题名。初始
+保留期较短且仅用于本地环境；通过 Kafka 兼容性冒烟测试后，再在 Kafka
+清单中固定具体时长。
 
-These topic counts and fallback paths are accepted by ADR-001/ADR-002. The
-topics are multi-partition from creation; the consumer replica-scaling
-experiment itself remains deferred.
+这些主题数量和兜底路径已由 ADR-001/ADR-002 接受。业务主题从创建时起即为
+多分区；消费者副本扩缩容实验本身仍然延期。
 
 ### Elasticsearch
 
-- Index pattern: `logs-stage3-*`.
-- `event_id` is the document `_id`.
-- `@timestamp` and `ingested_at` are dates.
-- Service, level, namespace, Pod UID, container ID and test-run fields use
-  exact-match mappings where queried as dimensions.
-- `message` is full-text searchable.
-- Index templates and mappings live in the repository.
+- 索引模式：`logs-stage3-*`。
+- `event_id` 用作 Elasticsearch 文档的 `_id`。
+- `@timestamp` 和 `ingested_at` 使用日期类型。
+- 服务、级别、命名空间、Pod UID、容器 ID 和测试批次字段在作为查询维度时
+  使用精确匹配映射。
+- `message` 支持全文检索。
+- 索引模板和映射保存在仓库中。
 
-Grafana uses the same Elasticsearch data source for details, level distribution
-and ERROR/WARN time trends. `v0.1.0` does not add a Go query service.
+Grafana 的明细、级别分布以及 ERROR/WARN 时间趋势使用同一个
+Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 
-## 6. Event and delivery contracts
+## 6. 事件与投递契约
 
-The required event fields and acceptance datasets are defined in
-`docs/requirements.md`.
+必需的事件字段和验收数据集定义在 `docs/requirements.md` 中。
 
-Delivery and acknowledgement rules are defined in
-`docs/adr/ADR-002-delivery-and-idempotency.md`:
+投递和确认规则定义在
+`docs/adr/ADR-002-delivery-and-idempotency.md` 中：
 
-- Filebeat and Kafka consumption are at least once.
-- Stable source fields produce a deterministic `event_id`.
-- Elasticsearch uses that ID for idempotent creation.
-- Kafka progress is acknowledged only after Elasticsearch success, confirmed
-  duplicate, or successful handling by the accepted poison-message path.
+- Filebeat 投递与 Kafka 消费均为至少一次。
+- 稳定的源字段生成确定性 `event_id`。
+- Elasticsearch 使用该 ID 实现幂等创建。
+- 只有在 Elasticsearch 写入成功、确认重复，或通过已接受的毒消息路径
+  成功处理后，才确认 Kafka 处理进度。
 
-## 7. Network and security boundary
+## 7. 网络与安全边界
 
-- No Kafka, Elasticsearch or Grafana Service is exposed publicly.
-- ConfigMaps hold non-sensitive configuration only.
-- Real credentials and notification destinations are never committed.
-- If Elasticsearch security is disabled to fit the isolated local cluster, the
-  manifest and deployment guide must label that choice as local development
-  only.
-- Production TLS, certificate lifecycle, multi-tenancy and user/RBAC systems
-  are outside this release.
+- Kafka、Elasticsearch 和 Grafana Service 均不对公网暴露。
+- ConfigMap 只保存非敏感配置。
+- 绝不提交真实凭据和通知目标。
+- 如果为了适配隔离的本地集群而关闭 Elasticsearch 安全功能，清单和部署指南
+  必须将该选择标注为仅限本地开发环境。
+- 生产级 TLS、证书生命周期、多租户以及用户和基于角色的访问控制系统不在本版本范围内。
 
-## 8. Version matrix and compatibility gate
+## 8. 版本矩阵与兼容性门禁
 
-Verified platform versions may be recorded now. Application image versions stay
-unselected until the corresponding compatibility smoke test passes.
+现在可以记录已验证的平台版本。应用镜像版本只有在相应的兼容性冒烟测试通过后
+才能选定。
 
-| Component | Version state | Evidence or gate |
+| 组件 | 版本状态 | 证据或门禁 |
 |---|---|---|
-| Go toolchain | Local tool verified: 1.26.5; module minimum target planned: 1.22 | `go version`; Go 1.22 compatibility remains unverified until CI/build runs it |
-| Docker Engine | Verified locally: 29.6.2 | Client and server output |
-| Minikube | Verified locally: 1.38.1 | `minikube version` / profile evidence |
-| Kubernetes | Verified cluster: v1.35.1 | Ready `stage3-logs` node |
-| containerd | Verified cluster: 2.2.1 | Node runtime output |
-| Kafka image | `TBD` | Pin tag and digest after single-node produce/consume smoke |
-| Filebeat image | `TBD` | Pass Filebeat→Kafka config/output checks and preserve the required real-event fields |
-| Elasticsearch image | `TBD` | Pin tag and digest after health, template, index and query smoke |
-| Grafana image | `TBD` | Pin after its Elasticsearch data-source/API compatibility and provisioned query pass |
-| Go Kafka client | `TBD` | Select only after Kafka protocol smoke and record rationale |
-| Go Elasticsearch client | `TBD` | Select after Elasticsearch major; client major must align |
+| Go 工具链 | 已选定且本地验证：1.26.5 | `go version`；`go.mod` 和持续集成必须使用 Go 1.26.5 |
+| Docker Engine | 本地已验证：29.6.2 | 客户端和服务端输出 |
+| Minikube | 本地已验证：1.38.1 | `minikube version` / 配置实例证据 |
+| Kubernetes | 集群已验证：v1.35.1 | `stage3-logs` 节点为 Ready |
+| containerd | 集群已验证：2.2.1 | 节点运行时输出 |
+| Kafka 镜像 | 待定 | 单节点生产/消费冒烟测试通过后固定镜像标签和摘要 |
+| Filebeat 镜像 | 待定 | 通过 Filebeat→Kafka 配置/输出检查，并保留必需的真实事件字段 |
+| Elasticsearch 镜像 | 待定 | 健康、模板、索引和查询冒烟测试通过后固定镜像标签和摘要 |
+| Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
+| Go Kafka 客户端 | 待定 | 仅在 Kafka 协议冒烟测试通过后选定，并记录理由 |
+| Go Elasticsearch 客户端 | 待定 | 在 Elasticsearch 主版本确定后选定；客户端主版本必须匹配 |
 
-`TBD` is not a deployable version. No manifest may use `latest`. For each
-selected image, record the exact tag, digest, source documentation and smoke
-result before replacing `TBD`.
+“待定”不是可部署版本。任何清单都不得使用 `latest`。每个镜像选定后，
+必须记录精确的镜像标签、摘要、来源文档和冒烟测试结果，才能替换“待定”。
 
-## 9. Verification layers
+## 9. 验证层次
 
-1. Static/config: Go formatting and vet, Kustomize build, Filebeat config/output
-   checks, Grafana provisioning validation.
-2. Unit: parsing, required fields, level normalization, deterministic ID and
-   retry classification.
-3. Integration: Kafka record to one Elasticsearch document; duplicate input to
-   one unique document.
-4. E2E: fixed `test_run_id` from both demo services through Grafana-visible
-   data.
-5. Recovery: processor restart, demo Pod replacement and bounded Kafka outage.
-6. Performance: declared event size/rate/duration with p50/p95/p99, error rate
-   and unique-document counts.
+1. 静态/配置：Go 格式检查与 `vet`、Kustomize 构建、Filebeat 配置/输出检查、
+   Grafana 自动配置验证。
+2. 单元：解析、必填字段、级别规范化、确定性 ID 和重试分类。
+3. 集成：一条 Kafka 记录对应一个 Elasticsearch 文档；重复输入仍只产生
+   一份唯一文档。
+4. 端到端：两个演示服务使用固定 `test_run_id`，数据最终可在 Grafana 中查看。
+5. 恢复：`log-processor` 重启、演示 Pod 替换和有界的 Kafka 不可用故障。
+6. 性能：声明事件大小、速率和持续时间，并记录 p50/p95/p99、错误率和
+   唯一文档数。
 
-`Pod Running`, valid-looking YAML or an open dashboard is not sufficient
-acceptance evidence.
+仅有“Pod 处于运行状态”、看似有效的 YAML 或能够打开的仪表盘，都不足以
+作为验收证据。
 
-## 10. Deferred decisions
+## 10. 延期决策
 
-- Exact Kafka, Elastic and Grafana image pins.
-- Exact heap, requests, limits and data-retention values.
-- UC-003 alerting, Prometheus, HPA and multi-partition scaling experiments.
-- Production-grade availability, security and cross-cluster collection.
+- Kafka、Elastic 和 Grafana 镜像的精确固定版本。
+- 精确的堆内存、资源请求、资源限制和数据保留值。
+- UC-003 告警、Prometheus、HPA 和多分区扩缩容实验。
+- 生产级可用性、安全性和跨集群采集。
 
-Each deferred value must be resolved by the relevant use case and backed by a
-command result or ADR update.
+每个延期值都必须由对应用例解决，并由命令结果或 ADR 更新提供证据。

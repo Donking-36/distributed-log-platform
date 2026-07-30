@@ -1,16 +1,16 @@
 # 项目三：分布式可扩展日志分析平台开发与 Codex 协作指南
 
-> 文档状态：阶段三启动基线  
-> 制定日期：2026-07-30  
-> 建议周期：7 天；最短 5 天完成核心用例  
-> 开发方式：用例驱动、文档驱动、Git Flow Lite、测试随实现提交  
-> 依据：[武大雷军班校企联合培养文档](./2-武大雷军班校企联合培养-云原生研发工程师岗位.docx)第 11～15 页
+> 文档状态：阶段三启动基线
+> 制定日期：2026-07-30
+> 建议周期：7 天；最短 5 天完成核心用例
+> 开发方式：用例驱动、文档驱动、精简 Git 分支流、测试随实现提交
+> 依据：外部资料《武大雷军班校企联合培养——云原生研发工程师岗位》第 11～15 页
 
 ## 0. 先看结论
 
 这一阶段不应一开始就同时搭 Kafka、Elasticsearch、Grafana、Prometheus、告警和 AI。正确顺序是按用户可验证的纵向用例，一次打通一小段：
 
-1. **UC-001 必做**：Pod 日志 → Filebeat DaemonSet → 按服务划分的 Kafka topic → Go 日志处理服务 → Elasticsearch。
+1. **UC-001 必做**：Pod 日志 → Filebeat DaemonSet → 按服务划分的 Kafka 主题 → Go 日志处理服务 → Elasticsearch。
 2. **UC-002 必做**：Elasticsearch → Grafana 全文检索、聚合图表和下钻。
 3. **工程加固**：Prometheus、资源限制、HPA、故障恢复和性能证据。
 4. **UC-003 选做**：日志异常告警。
@@ -28,7 +28,7 @@
 - Grafana 支持时间范围、服务和关键词查询，并展示日志级别占比、异常趋势和详情。
 - UC-001、UC-002 必做；UC-003、UC-004 选做。
 - 最终应有架构设计、Kubernetes 部署手册、性能测试报告、复盘报告和完整测试。
-- 代码托管在 GitHub，采用 Git Flow。
+- 代码托管在 GitHub，采用 Git 分支流。
 
 ### 1.2 原文中需要补全的设计
 
@@ -42,7 +42,7 @@ Kafka logs.<service>
 
 这不是额外扩张，而是让 UC-001 的链路真正闭合，也让 Go 分布式服务开发成为阶段核心。
 
-UC-002 中的 Go 查询中间层是原文的可选步骤。为了保持代码精简，`v0.1.0` 让 Grafana 直接查询 Elasticsearch，不重复实现一套查询 API。只有出现权限隔离、跨索引聚合或稳定外部 API 的明确需求时，才新增查询服务。
+UC-002 中的 Go 查询中间层是原文的可选步骤。为了保持代码精简，`v0.1.0` 让 Grafana 直接查询 Elasticsearch，不重复实现一套查询接口。只有出现权限隔离、跨索引聚合或稳定外部接口的明确需求时，才新增查询服务。
 
 ### 1.3 对量化验收的诚实解释
 
@@ -69,8 +69,8 @@ Filebeat 的投递语义是“至少一次”，发生未确认重试时可能�
 | Docker Compose | v5.3.1 |
 | kubectl | v1.36.3 |
 | Kustomize | v5.8.1，随 kubectl 可用 |
-| Minikube | v1.38.1；计划为阶段三创建独立的 `stage3-logs` profile |
-| Kubernetes | `stage3-logs` profile 尚未创建；创建前没有阶段三可用集群 |
+| Minikube | v1.38.1；计划为阶段三创建独立的 `stage3-logs` 配置档 |
+| Kubernetes | `stage3-logs` 配置档尚未创建；创建前没有阶段三可用集群 |
 | 容器运行时 | containerd 2.2.1 |
 | Git | WSL 2.43.0；Windows 2.55.0 |
 | GitHub CLI | Windows 有 2.96.0；WSL 中未安装 |
@@ -81,7 +81,7 @@ Filebeat 的投递语义是“至少一次”，发生未确认重试时可能�
 
 注意事项：
 
-- Go 目前在登录 shell 中可见，但非登录 shell 可能找不到。若 IDE 或脚本报告 `go: command not found`，先检查 shell 配置，不要重复安装 Go。
+- Go 目前在登录终端中可见，但非登录终端可能找不到。若集成开发环境或脚本报告 `go: command not found`，先检查终端配置，不要重复安装 Go。
 - `D:\codesource\go2` 下虽然有一个空 `.git` 目录，但它不是有效仓库；这个目录还包含其他学习目录和多份文档，不应直接初始化成项目三仓库。
 - 项目三直接创建独立的 `stage3-logs`，初始分配 4 CPU 和 6 GiB 内存。
 - 项目三应建立独立仓库。为了 WSL 文件 I/O、权限和符号链接更稳定，推荐放在 Linux 文件系统：
@@ -96,16 +96,16 @@ Windows 可通过下列路径访问：
 \\wsl$\Ubuntu-24.04\home\<你的Linux用户名>\projects\distributed-log-platform
 ```
 
-本指南当前保存在 Windows 工作区。Day 1 建仓后，把它复制为新仓库中的 `docs/PLAN.md`。
+本指南当前保存在 Windows 工作区。第 1 天建仓后，把它复制为新仓库中的 `docs/PLAN.md`。
 
-### 2.1 Day 1 容量门禁
+### 2.1 第 1 天容量门禁
 
 完整栈启动前必须创建并验证独立的阶段三集群。
 
 **本轮已选方案**
 
-- 新建 `stage3-logs` profile，初始使用 4 CPU、6 GiB 内存、Docker driver 和 containerd runtime。
-- Kafka 和 Elasticsearch 使用开发级小 heap、单副本和短数据保留。
+- 新建 `stage3-logs` 配置档，初始使用 4 个处理器、6 GiB 内存、Docker 驱动和 containerd 运行时。
+- Kafka 和 Elasticsearch 使用开发级小内存堆、单副本和短数据保留。
 - 用户已确认创建 `stage3-logs`；执行时先展示精确命令，但不需要再次询问这项操作。
 
 建议创建命令：
@@ -121,17 +121,17 @@ minikube start -p stage3-logs \
 **资源不足时的升级方案**
 
 - WSL 可用 10～12 GiB，`stage3-logs` Minikube 分配 8 GiB。
-- 这更适合 Day 6 同时运行 Prometheus 和压测。
-- 只有出现 OOM、频繁重启或 Day 6 资源不足的实际证据后，再讨论修改 `.wslconfig` 和重建/调整 profile。
+- 这更适合第 6 天同时运行 Prometheus 和压测。
+- 只有出现内存不足、频繁重启或第 6 天资源不足的实际证据后，再讨论修改 `.wslconfig` 和重建或调整配置档。
 
 **创建后的硬验证**
 
-- `minikube profile list` 中的 `stage3-logs` 为 Running。
+- `minikube profile list` 中的 `stage3-logs` 为运行状态。
 - `kubectl config current-context` 为 `stage3-logs`。
-- `kubectl get nodes` 显示新节点 Ready。
+- `kubectl get nodes` 显示新节点已就绪。
 - Docker 外层容器内存限制约为 6 GiB。
 
-本次授权只覆盖创建 `stage3-logs`。修改 `.wslconfig`、关闭 WSL、删除或重配任何 profile，以及删除或重建 `stage3-logs`，仍需另行确认。创建后要同时检查 WSL 可见内存、Minikube 外层容器限制和 Kubernetes 节点状态，不能只相信 profile 配置文件。
+本次授权只覆盖创建 `stage3-logs`。修改 `.wslconfig`、关闭 WSL、删除或重配任何配置档，以及删除或重建 `stage3-logs`，仍需另行确认。创建后要同时检查 WSL 可见内存、Minikube 外层容器限制和 Kubernetes 节点状态，不能只相信配置档文件。
 
 ## 3. 范围基线
 
@@ -139,7 +139,7 @@ minikube start -p stage3-logs \
 
 - 一个输出结构化 JSON 日志的 `demo-app`。
 - Filebeat 以 DaemonSet 运行，采集目标 Pod 日志并添加 Kubernetes 元数据。
-- Kafka 单节点开发配置，按服务创建 `logs.<service>` 主题；同一个 demo 镜像以两个服务名部署即可验证路由。
+- Kafka 单节点开发配置，按服务创建 `logs.<service>` 主题；同一个演示镜像以两个服务名部署即可验证路由。
 - Go `log-processor` 消费 Kafka，规范化事件并幂等写入 Elasticsearch。
 - Elasticsearch 保存可全文检索、可按时间/服务/级别聚合的日志。
 - Grafana 数据源和仪表盘通过仓库文件自动配置。
@@ -151,7 +151,7 @@ minikube start -p stage3-logs \
 
 - `log-processor` 暴露 Prometheus 指标。
 - Prometheus 采集平台核心指标，Grafana 增加平台健康仪表盘。
-- `log-processor` 配置资源 request/limit 和 CPU 型 HPA。
+- `log-processor` 配置资源请求与上限和处理器型 HPA。
 - Kafka 主题使用多个分区，并验证消费者副本扩展。
 - 故障注入、重试、幂等、延迟和吞吐报告。
 - 时间允许时完成 UC-003 的本地告警闭环。
@@ -159,9 +159,9 @@ minikube start -p stage3-logs \
 ### 3.3 本轮明确不做
 
 - UC-004 PyTorch 异常检测。
-- 多租户、RBAC 用户系统、跨集群采集和生产级 TLS/证书体系。
-- 自研 Web 前端。
-- 同时保留 Grafana 查询和重复的 Go 查询 API。
+- 多租户、基于角色的访问控制用户系统、跨集群采集和生产级 TLS/证书体系。
+- 自研网页前端。
+- 同时保留 Grafana 查询和重复的 Go 查询接口。
 - 为“以后也许需要”提前引入微服务框架、依赖注入框架或复杂领域层。
 - 生产级多节点 Kafka/Elasticsearch 高可用集群。
 
@@ -169,7 +169,7 @@ minikube start -p stage3-logs \
 
 ```mermaid
 flowchart LR
-    A["demo-app Pod<br/>stdout JSON 日志"]
+    A["demo-app Pod<br/>标准输出 JSON 日志"]
     N["Kubernetes 节点日志目录"]
     F["Filebeat DaemonSet<br/>采集 + Kubernetes 元数据"]
     K[("Kafka<br/>logs.&lt;service&gt;，多分区")]
@@ -192,8 +192,8 @@ flowchart LR
 |---|---|---|
 | `demo-app` | 产生可预测、可编号的结构化日志 | 不直接写 Kafka 或 Elasticsearch |
 | Filebeat | 采集节点上的容器日志，补充 K8s 元数据，发送 Kafka | 不做业务聚合，不直接写 ES |
-| Kafka | 按服务 topic 解耦采集与处理，提供短时缓冲和重放基础 | 不负责长期检索 |
-| `log-processor` | 消费、校验、规范化、幂等 ID、写 ES | `v0.1.0` 不提供通用查询 API |
+| Kafka | 按服务主题解耦采集与处理，提供短时缓冲和重放基础 | 不负责长期检索 |
+| `log-processor` | 消费、校验、规范化、幂等标识、写 Elasticsearch | `v0.1.0` 不提供通用查询接口 |
 | Elasticsearch | 索引、全文检索、聚合 | 不作为消息队列 |
 | Grafana | 查询、可视化、下钻 | 不保存日志主数据 |
 | Prometheus | 第 6 天采集平台指标 | 不采集日志正文 |
@@ -206,7 +206,7 @@ flowchart LR
 {
   "@timestamp": "2026-07-30T12:00:00Z",
   "event_id": "sha256:...",
-  "message": "database connection failed",
+  "message": "数据库连接失败",
   "log.level": "ERROR",
   "service.name": "demo-app",
   "test_run_id": "e2e-20260730-001",
@@ -222,7 +222,7 @@ flowchart LR
 
 字段命名优先向 Elastic Common Schema 靠拢，但本轮只保留验收确实会使用的字段。
 
-`test_run_id` 仅用于可重复验收和性能实验：每次 smoke/perf 生成一个唯一值，使我们能证明同一批探针事件确实穿过了整条链路，而不是误查到上一次残留数据。生产日志没有该字段时允许为空。
+`test_run_id` 仅用于可重复验收和性能实验：每次冒烟或性能测试生成一个唯一值，使我们能证明同一批探针事件确实穿过了整条链路，而不是误查到上一次残留数据。生产日志没有该字段时允许为空。
 
 ### 4.3 幂等与确认边界
 
@@ -240,15 +240,15 @@ message
 处理规则：
 
 1. 对字段做稳定排序与明确分隔后计算 SHA-256。
-2. 以 `event_id` 作为 Elasticsearch 文档 `_id`；优先使用 bulk `create` 动作，把 HTTP 409 视为“已存在的重复事件”并计数，而不是系统失败。
+2. 以 `event_id` 作为 Elasticsearch 文档 `_id`；优先使用批量 `create` 动作，把 HTTP 409 视为“已存在的重复事件”并计数，而不是系统失败。
 3. Elasticsearch 写入成功后，才确认对应 Kafka 消息。
-4. 可重试的 ES 错误不确认 offset，按有上限的指数退避重试。
+4. 可重试的 Elasticsearch 错误不确认位点，按有上限的指数退避重试。
 5. 无法解析的毒消息不能永久阻塞分区；最简方案是写入 `logs.dlq` 后确认，或在 ADR 中明确采用的替代策略。
 6. 测试必须证明同一事件重复投递后只有一份最终文档。
 
 ## 5. 精简仓库结构
 
-Day 1 先建立最少目录；对应功能开始前不要创建空包：
+第 1 天先建立最少目录；对应功能开始前不要创建空包：
 
 ```text
 distributed-log-platform/
@@ -290,12 +290,12 @@ distributed-log-platform/
 
 ### 5.1 Go 代码约束
 
-- 本机 Go 1.26.5 只是开发工具版本。`go.mod` 初始目标优先保持 `go 1.22`，避免无意使用 1.26 专属语法；依赖若迫使最低版本上调，必须先记录兼容性证据和偏离原因。
-- CI 至少验证仓库声明的最低 Go 版本；条件允许时再加当前本机版本，不用“本机能编译”代替最低版本验证。
+- 2026-07-30 项目覆盖决定：用户明确选择 Go 1.26.5 作为开发、`go.mod` 与持续集成的统一版本；该决定取代本指南早期“模块优先保持 Go 1.22”的建议。
+- 持续集成至少验证仓库声明的最低 Go 版本；条件允许时再加当前本机版本，不用“本机能编译”代替最低版本验证。
 - 使用 `log/slog`，不再引入另一个日志库。
 - HTTP 仅用于健康检查和指标时优先使用 `net/http`，不为两个端点引入 Gin/Echo。
 - 只在 Kafka 与 Elasticsearch 这样的外部边界定义小接口；不要把每个结构体都抽象成接口。
-- 手写很小的 fake，不引入 mock 生成框架。
+- 手写很小的测试替身，不引入模拟对象生成框架。
 - 配置来自环境变量；启动时一次校验，缺少必填配置立即失败。
 - 所有后台循环接收 `context.Context`，支持 `SIGTERM` 优雅退出。
 - 错误在能增加语义时用 `%w` 包装；同一错误不在每层重复打印。
@@ -306,13 +306,13 @@ distributed-log-platform/
 
 ### 5.2 Kubernetes 约束
 
-- 使用 Minikube，不额外引入 kind、k3d 或 Helm；完整栈优先放入独立 `stage3-logs` profile。
-- 创建和切换 `stage3-logs` context 前后都要显式检查当前 context。
+- 使用 Minikube，不额外引入 kind、k3d 或 Helm；完整栈优先放入独立 `stage3-logs` 配置档。
+- 创建和切换 `stage3-logs` 上下文前后都要显式检查当前上下文。
 - 使用 Kustomize 管理本地 overlay；镜像与关键依赖必须固定版本，禁止 `latest`。
-- 所有对象放在独立 namespace，例如 `stage3-logs`。
+- 所有对象放在独立命名空间，例如 `stage3-logs`。
 - ConfigMap 只放非敏感配置；Secret 不提交真实值。
-- 所有自研 Deployment 配置 readiness、liveness、资源 request/limit 和优雅终止时间。
-- Filebeat 只采集目标 namespace/工作负载，显式排除自身和基础设施日志，防止递归采集。
+- 所有自研 Deployment 配置就绪探针、存活探针、资源请求与上限和优雅终止时间。
+- Filebeat 只采集目标命名空间或工作负载，显式排除自身和基础设施日志，防止递归采集。
 - Kafka、Elasticsearch、Grafana 在本机均采用单节点开发配置；文档中明确它们不是生产拓扑。
 - 基础设施 Service 默认使用 `ClusterIP`，本机查看界面优先临时 `kubectl port-forward`；不为了演示把 Kafka、ES 或 Grafana 暴露到公网。
 - 若开发环境为降低资源关闭 Elasticsearch 安全功能，必须标注“仅限隔离的本机集群”，不能把该配置描述成部署最佳实践。
@@ -321,12 +321,12 @@ distributed-log-platform/
 
 项目三不依赖项目二代码、提交历史或目录结构，按全新的独立仓库开发：
 
-- 需求、日志契约、topic、索引和测试都以项目三的 UC-001、UC-002 为唯一依据。
+- 需求、日志契约、主题、索引和测试都以项目三的 UC-001、UC-002 为唯一依据。
 - 不安排旧项目代码扫描、复制或迁移任务。
 - 所有 Go 类型、配置加载、健康检查、事件规范化和幂等逻辑均在新仓库中按当前用例从零实现。
-- 先写当前行为和失败测试，再写最小实现；不预建完整的 `handler → service → repository` 分层。
+- 先写当前行为和失败测试，再写最小实现；不预建完整的“处理器 → 服务 → 仓储”分层。
 - 可以继续采用表驱动测试、标准库优先、小提交等通用工程方法，但它们不构成对旧项目代码的依赖。
-- 新仓库拥有独立的 `go.mod`、Git 历史、CI、部署配置和文档，不引用工作区中的其他工程目录。
+- 新仓库拥有独立的 `go.mod`、Git 历史、持续集成、部署配置和文档，不引用工作区中的其他工程目录。
 
 ## 6. 用例驱动的工作方法
 
@@ -334,7 +334,7 @@ distributed-log-platform/
 
 ```text
 澄清用例
-→ 写 Given/When/Then 验收场景
+→ 写“前提/当/则”验收场景
 → 画最短数据路径
 → 先写能失败的测试或验收脚本
 → 实现最小代码
@@ -351,7 +351,7 @@ distributed-log-platform/
 
 每天建议 6～8 小时。上午先学原理并完成最小切片；下午打通真实链路；最后 30～45 分钟只做测试、提交和状态记录。
 
-### Day 1：范围、仓库、架构和最小工程骨架
+### 第 1 天：范围、仓库、架构和最小工程骨架
 
 **学习重点**
 
@@ -363,17 +363,17 @@ distributed-log-platform/
 **当天任务**
 
 1. 在 WSL 的 `~/projects/distributed-log-platform` 新建独立目录。
-2. 检查 Go PATH、Docker、kubectl context、Minikube 节点和可用资源。
-3. 按第 2.1 节创建 `stage3-logs`，验证新 context、节点状态和 6 GiB 外层内存限制。
+2. 检查 Go 路径、Docker、kubectl 上下文、Minikube 节点和可用资源。
+3. 按第 2.1 节创建 `stage3-logs`，验证新上下文、节点状态和 6 GiB 外层内存限制。
 4. 按第 5.3 节确认独立实现边界，不扫描或迁移其他项目代码。
 5. 从本指南提炼并提交：
    - `docs/requirements.md`
    - `docs/architecture.md`
    - `docs/adr/ADR-001-pipeline.md`
    - `docs/adr/ADR-002-delivery-and-idempotency.md`
-6. 初始化 Go module，只建立 `cmd/demo-app` 的最小可运行程序和测试。
+6. 初始化 Go 模块，只建立 `cmd/demo-app` 的最小可运行程序和测试。
 7. 建立 `Makefile` 的真实命令入口：`fmt`、`vet`、`test`、`build`；不存在的集群命令先不伪造。
-8. 建立最小 Go CI，只执行格式检查、`go vet` 和单元测试；暂不把重型 Kubernetes 集成环境塞入 CI。
+8. 建立最小 Go 持续集成，只执行格式检查、`go vet` 和单元测试；暂不把重型 Kubernetes 集成环境塞入持续集成。
 9. 建立 `.gitignore`、README 骨架、`AGENTS.md` 和 `docs/PROJECT_STATE.md`。
 10. 本地首个提交后，再创建 GitHub 私有仓库并配置远端；确认凭据后推送。
 11. 建立 `develop`，后续功能从 `develop` 开分支。
@@ -386,19 +386,19 @@ main
 └── develop
     └── feature/bootstrap
 
-chore: initialize stage three repository
-docs: define use cases and architecture baseline
-feat(demo): add minimal structured log producer
-test(demo): verify deterministic event output
+chore: 初始化阶段三仓库
+docs: 定义用例与架构基线
+feat(demo): 添加最小结构化日志生成器
+test(demo): 验证确定性事件输出
 ```
 
 **当天退出条件**
 
 - GitHub 远端可访问，`main` 与 `develop` 已推送。
 - `go test ./...`、`go vet ./...`、格式检查通过。
-- 阶段三目标 context 已明确，`kubectl get nodes` 显示节点 Ready，Minikube 外层内存限制达到选定值。
+- 阶段三目标上下文已明确，`kubectl get nodes` 显示节点已就绪，Minikube 外层内存限制达到选定值。
 - 架构图能明确回答“Kafka 到 ES 由谁处理”。
-- `PROJECT_STATE.md` 写明 Day 2 的唯一第一步。
+- `PROJECT_STATE.md` 写明第 2 天的唯一第一步。
 
 **当天不要做**
 
@@ -406,14 +406,14 @@ test(demo): verify deterministic event output
 - 不一次性生成所有 Kubernetes YAML。
 - 不在 `D:\codesource\go2` 根目录执行 `git init`。
 
-### Day 2：UC-001A——Pod 日志进入 Kafka
+### 第 2 天：UC-001A——Pod 日志进入 Kafka
 
 **学习重点**
 
 - Kubernetes 容器日志落盘方式。
 - DaemonSet 为什么是节点级采集器。
-- Filebeat registry 与至少一次投递。
-- Kafka topic、partition、key、ack 的基本含义。
+- Filebeat 状态注册表与至少一次投递。
+- Kafka 主题、分区、键和确认机制的基本含义。
 
 **当天任务**
 
@@ -424,28 +424,28 @@ test(demo): verify deterministic event output
    - 字段只保留时间、级别、服务、消息和测试序号。
 3. 为 demo-app 创建最小镜像和 Kubernetes Deployment。
 4. 把同一个 demo 镜像以 `demo-api`、`demo-worker` 两个服务名部署，用于验证按服务路由，避免再写第二套生产器代码。
-5. 部署本地单节点 Kafka，预创建 `logs.demo-api`、`logs.demo-worker`；每个 topic 的分区数在版本矩阵/ADR 中固定，并为后续扩容保留足够的总分区数。
+5. 部署本地单节点 Kafka，预创建 `logs.demo-api`、`logs.demo-worker`；每个主题的分区数在版本矩阵或 ADR 中固定，并为后续扩容保留足够的总分区数。
 6. 部署 Filebeat DaemonSet：
    - 挂载容器日志目录与自身 registry；
    - 配置 Kubernetes 元数据；
    - 只采集 demo-app；
-   - 根据受控的 `service` Pod label 路由到 `logs.<service>`；
-   - 使用稳定的服务/Pod 字段作为 Kafka key，或在 ADR 中记录明确的分区策略；
-   - 未知或缺失服务标签不能生成任意 topic，必须进入固定 fallback 或被显式拒绝并计数。
-7. 分别用临时 Kafka consumer 查看两个 topic 的真实事件，不靠 Filebeat 自身日志判断成功。
+   - 根据受控的 Pod `service` 标签路由到 `logs.<service>`；
+   - 使用稳定的服务或 Pod 字段作为 Kafka 分区键，或在 ADR 中记录明确的分区策略；
+   - 未知或缺失服务标签不能生成任意主题，必须进入固定后备主题或被显式拒绝并计数。
+7. 分别用临时 Kafka 消费者查看两个主题的真实事件，不靠 Filebeat 自身日志判断成功。
 8. 暂停 Kafka，确认 Filebeat 重试且磁盘不会无限增长；恢复后确认继续投递。
 9. 保存验收命令和关键结果到 `docs/test-report.md`。
 
 **最小验收场景**
 
 ```gherkin
-Given demo-api 与 demo-worker 使用唯一 test_run_id 各输出 20 条编号日志
-And Filebeat DaemonSet 与 Kafka 正常运行
-When 等待 Filebeat 完成采集
-Then logs.demo-api 与 logs.demo-worker 各能消费到对应的 20 条事件
-And 每条事件包含 namespace、pod、service 和原始消息
-And 两个服务的事件没有路由到对方 topic
-And 不包含 Filebeat 自身递归日志
+前提：demo-api 与 demo-worker 使用唯一 test_run_id 各输出 20 条编号日志
+并且：Filebeat DaemonSet 与 Kafka 正常运行
+当：等待 Filebeat 完成采集
+则：logs.demo-api 与 logs.demo-worker 各能消费到对应的 20 条事件
+并且：每条事件包含命名空间、Pod、服务和原始消息
+并且：两个服务的事件没有路由到对方主题
+并且：不包含 Filebeat 自身递归日志
 ```
 
 **当天退出条件**
@@ -455,13 +455,13 @@ And 不包含 Filebeat 自身递归日志
 - Filebeat 配置能通过内置 config/output 检查。
 - PR 合并到 `develop` 前，文档说明本次测试的日志数和限制。
 
-### Day 3：UC-001B——Go 消费、幂等和 Elasticsearch
+### 第 3 天：UC-001B——Go 消费、幂等和 Elasticsearch
 
 **学习重点**
 
-- Kafka consumer group 与 offset 确认。
+- Kafka 消费者组与位点确认。
 - 至少一次消费为什么要求幂等。
-- Elasticsearch mapping、keyword/text/date 的差异。
+- Elasticsearch 映射中精确匹配、全文检索和日期类型的差异。
 - 批量写入、退避和优雅退出。
 
 **当天任务**
@@ -473,18 +473,18 @@ And 不包含 Filebeat 自身递归日志
    - 级别规范化；
    - 稳定 `event_id`；
    - 同输入得到同 ID，关键输入变化得到不同 ID。
-3. 部署单节点 Elasticsearch，创建 `logs-stage3-*` 的 index template。
+3. 部署单节点 Elasticsearch，创建 `logs-stage3-*` 的索引模板。
 4. 实现 `log-processor`：
-   - consumer group 消费配置中允许的 `logs.<service>` topic 列表；
+   - 消费者组消费配置中允许的 `logs.<service>` 主题列表；
    - 解析并转成最小日志契约；
    - 生成稳定 `_id`；
    - 以小批次写入 ES；
    - 成功写入后才确认消息；
    - 对可重试错误退避；
-   - 为毒消息实施并记录 DLQ 或等价策略；
+   - 为毒消息实施并记录死信队列或等价策略；
    - 提供 `/healthz`、`/readyz`。
-5. 使用多阶段 Dockerfile 构建，并以非 root 用户运行。
-6. 部署到 Kubernetes，配置 Secret/ConfigMap、探针、资源 request/limit 和优雅终止。
+5. 使用多阶段 Dockerfile 构建，并以非根用户运行。
+6. 部署到 Kubernetes，配置 Secret、ConfigMap、探针、资源请求与上限和优雅终止。
 7. 完成真实集成测试：
    - Kafka 放入一条事件，ES 可查询；
    - 同一事件重复投递，ES 中唯一文档数不增加；
@@ -497,20 +497,20 @@ And 不包含 Filebeat 自身递归日志
 - 幂等集成测试通过。
 - `go test -race ./...` 通过；核心纯逻辑包有覆盖率报告。
 
-### Day 4：UC-002——全文检索、聚合和 Grafana
+### 第 4 天：UC-002——全文检索、聚合和 Grafana
 
 **学习重点**
 
 - Elasticsearch `text` 与 `keyword` 查询。
-- 时间范围过滤与聚合 bucket。
-- Grafana 数据源、dashboard provisioning 和变量。
+- 时间范围过滤与聚合分桶。
+- Grafana 数据源、仪表盘自动配置和变量。
 - “页面能看到”与“可重复部署”的区别。
 
 **当天任务**
 
 1. 建立 `feature/uc-002-search-dashboard`。
 2. 通过 YAML 自动配置 Grafana 的 Elasticsearch 数据源，索引模式指向 `logs-stage3-*`。
-3. 通过仓库中的 JSON 或 provisioning 文件创建仪表盘：
+3. 通过仓库中的 JSON 或自动配置文件创建仪表盘：
    - 日志明细列表；
    - 各服务日志级别占比；
    - ERROR/WARN 趋势；
@@ -524,17 +524,17 @@ And 不包含 Filebeat 自身递归日志
    - 全文关键词；
    - 无结果；
    - 图表与明细数量一致。
-6. 对固定数据规模重复执行查询，记录 p50/p95；若未达到 1 秒，先检查 mapping、时间范围和聚合，而不是直接增加资源。
-7. 把数据源和 dashboard 的“从空环境恢复”纳入 smoke 流程。
+6. 对固定数据规模重复执行查询，记录 p50/p95；若未达到 1 秒，先检查映射、时间范围和聚合，而不是直接增加资源。
+7. 把数据源和仪表盘的“从空环境恢复”纳入冒烟流程。
 
 **当天退出条件**
 
 - 删除并重建 Grafana 后，数据源和仪表盘能自动恢复。
 - UC-002 的三种查询条件都有可重复验收步骤。
 - 仪表盘至少有明细、级别分布、异常趋势三个视图。
-- 未引入重复的 Go 查询 API。
+- 未引入重复的 Go 查询接口。
 
-### Day 5：核心验收、故障恢复、文档和 `v0.1.0`
+### 第 5 天：核心验收、故障恢复、文档和 `v0.1.0`
 
 **学习重点**
 
@@ -545,7 +545,7 @@ And 不包含 Filebeat 自身递归日志
 **当天任务**
 
 1. 建立 `feature/core-acceptance` 或 `release/v0.1.0`。
-2. 从空 namespace 执行一次完整部署，不使用之前手工残留状态。
+2. 从空命名空间执行一次完整部署，不使用之前手工残留状态。
 3. 运行 `scripts/smoke.sh`，至少验证：
    - 生成带唯一 `test_run_id` 的 N 条编号日志；
    - Kafka 收到；
@@ -578,16 +578,16 @@ And 不包含 Filebeat 自身递归日志
 - 文档能让另一位同学从空环境复现。
 - 使用两个不同 `test_run_id` 连续完成两次核心演示，避免把偶然成功当成稳定结果。
 
-若这里未通过，Day 6 继续修复，不进入 Prometheus/HPA。
+若这里未通过，第 6 天继续修复，不进入 Prometheus 或 HPA。
 
-### Day 6：平台可观测性、HPA 和性能加固
+### 第 6 天：平台可观测性、HPA 和性能加固
 
 **学习重点**
 
 - 日志、指标和追踪的不同用途。
-- Prometheus counter、gauge、histogram。
+- Prometheus 计数器、仪表值和直方图。
 - Kubernetes HPA 的资源指标来源。
-- Kafka partition 数为何限制同一 consumer group 的有效并发度。
+- Kafka 分区数为何限制同一消费者组的有效并发度。
 
 **当天任务**
 
@@ -601,23 +601,23 @@ And 不包含 Filebeat 自身递归日志
    - 当前批次或积压的可观测近似值
 3. 部署 Prometheus 并抓取指标。
 4. Grafana 增加“平台健康”仪表盘：吞吐、错误、写入延迟、Pod 状态和资源。
-5. 当前环境没有 metrics-server；先安装并验证 Metrics API，再为 processor 配置 CPU 型 HPA。
-6. 生成持续负载，观察 1→N→1 扩缩容。`maxReplicas` 不应高于该 consumer group 可分配的 topic 总分区数，除非文档明确解释空闲副本。
-7. 重跑性能和恢复测试，对比 Day 5。
+5. 当前环境没有 `metrics-server`；先安装并验证指标接口，再为处理器配置处理器型 HPA。
+6. 生成持续负载，观察 1→N→1 扩缩容。`maxReplicas` 不应高于该消费者组可分配的主题总分区数，除非文档明确解释空闲副本。
+7. 重跑性能和恢复测试，对比第 5 天。
 8. 达不到目标时记录瓶颈和下一实验，不做无证据的参数堆砌。
 
-CPU 型 HPA 在本项目中主要用于学习和证明 Kubernetes 扩缩容机制。日志消费者更理想的生产信号通常是 Kafka lag；接入 Prometheus Adapter 属于额外范围，本轮不为“更像生产”而强行增加。
+处理器型 HPA 在本项目中主要用于学习和证明 Kubernetes 扩缩容机制。日志消费者更理想的生产信号通常是 Kafka 积压量；接入 Prometheus Adapter 属于额外范围，本轮不为“更像生产”而强行增加。
 
 **当天退出条件**
 
-- Prometheus targets 正常。
+- Prometheus 采集目标正常。
 - Grafana 能看到处理速率、失败数和延迟。
 - HPA 在可重复负载下发生扩容并最终缩容。
 - 资源请求、分区数、消费者副本之间的关系写入性能报告。
 
-### Day 7：优先稳定；核心全绿后再选做 UC-003
+### 第 7 天：优先稳定；核心全绿后再选做 UC-003
 
-Day 7 有两个互斥路径，按门禁选择。
+第 7 天有两个互斥路径，按门禁选择。
 
 **路径 A：核心存在失败**
 
@@ -626,7 +626,7 @@ Day 7 有两个互斥路径，按门禁选择。
 - 删除没有带来验收价值的抽象和重复配置。
 - 完成最终复盘与 `v0.1.x` 修复发布。
 
-**路径 B：核心与 Day 6 全绿**
+**路径 B：核心与第 6 天全绿**
 
 1. 建立 `feature/uc-003-alerting`。
 2. 由 Go processor 暴露按服务/级别统计指标，Prometheus 采集。
@@ -635,7 +635,7 @@ Day 7 有两个互斥路径，按门禁选择。
 5. 验证告警产生、分组、恢复通知和 Grafana 详情链接。
 6. 完成 `v0.2.0`，更新 CHANGELOG 和复盘。
 
-**Day 7 仍不做**
+**第 7 天仍不做**
 
 - 不临时编造训练集完成 UC-004。
 - 不用硬编码预测结果冒充 95% 准确率。
@@ -645,16 +645,16 @@ Day 7 有两个互斥路径，按门禁选择。
 | 天 | 必须保留 | 必须删减 |
 |---|---|---|
 | 1 | 仓库、需求、架构、Go 骨架、GitHub | 不做完整基础设施可观测 |
-| 2 | demo-app、Kafka、Filebeat、Kafka 验收 | 不做动态多 topic 和复杂路由 |
-| 3 | Go processor、ES、幂等、恢复 | 不做通用查询服务 |
-| 4 | Grafana provisioning、查询与聚合 | 不做 Jaeger、Prometheus |
-| 5 | 空环境 E2E、故障、性能基线、文档、发布 | 不做 UC-003/UC-004 |
+| 2 | demo-app、Kafka、Filebeat、Kafka 验收 | 不做动态多主题和复杂路由 |
+| 3 | Go 处理器、Elasticsearch、幂等、恢复 | 不做通用查询服务 |
+| 4 | Grafana 自动配置、查询与聚合 | 不做 Jaeger、Prometheus |
+| 5 | 空环境端到端、故障、性能基线、文档、发布 | 不做 UC-003/UC-004 |
 
 五天版是“核心用例完成”，不是“原文所有扩展验收全部完成”。若需要展示平台自身可观测和 HPA，应使用 7 天版。
 
-## 9. GitHub 与 Git Flow Lite
+## 9. GitHub 与精简 Git 分支流
 
-文档要求 Git Flow，但单人 5～7 天项目不需要制造大量空分支。使用以下精简形式：
+文档要求 Git 分支流，但单人 5～7 天项目不需要制造大量空分支。使用以下精简形式：
 
 ### 9.1 长期分支
 
@@ -676,27 +676,27 @@ feature/uc-003-alerting
 ### 9.3 提交示例
 
 ```text
-docs: define stage three use cases
-feat(demo): emit deterministic structured logs
-feat(filebeat): ship pod logs to kafka
-feat(processor): index kafka events idempotently
-test(pipeline): verify duplicate delivery
-feat(grafana): provision log search dashboard
-chore(k8s): add local resource limits
-fix(processor): commit offsets after successful indexing
+docs: 定义阶段三用例
+feat(demo): 输出确定性结构化日志
+feat(filebeat): 将 Pod 日志发送到 Kafka
+feat(processor): 幂等索引 Kafka 事件
+test(pipeline): 验证重复投递
+feat(grafana): 自动配置日志检索仪表盘
+chore(k8s): 添加本地资源上限
+fix(processor): 成功索引后提交位点
 ```
 
 一次提交只表达一个可说明的意图。代码、测试和直接相关文档可以同提交；不要把不相关 YAML、重构和新功能混在一起。
 
-### 9.4 Day 1 远端建立顺序
+### 9.4 第 1 天远端建立顺序
 
-先在 WSL 创建本地仓库和首个提交，再建立远端。当前 WSL 没有 `gh`，Windows 有 GitHub CLI，因此 Day 1 先执行只读检查并选择认证方式：
+先在 WSL 创建本地仓库和首个提交，再建立远端。当前 WSL 没有 `gh`，Windows 有 GitHub 命令行工具，因此第 1 天先执行只读检查并选择认证方式：
 
 ```powershell
 gh auth status
 ```
 
-确认账号与仓库可见性后，才创建远端。默认建议先建私有仓库，完成密钥扫描和文档检查后再决定是否公开。不要把 token 放进命令、远端 URL、配置或聊天内容。
+确认账号与仓库可见性后，才创建远端。默认建议先建私有仓库，完成密钥扫描和文档检查后再决定是否公开。不要把令牌放进命令、远端网址、配置或聊天内容。
 
 ## 10. 测试与验收矩阵
 
@@ -704,13 +704,13 @@ gh auth status
 |---|---|---|---|
 | 格式/静态 | Go 格式、vet | `make fmt-check`、`make vet` | 退出码 0 |
 | 单元 | 解析、规范化、ID、退避决策 | `make test` | 测试和核心包覆盖率 |
-| 集成 | Kafka consumer、ES 幂等写入 | `make test-integration` | 固定输入、唯一文档数、错误结果 |
-| 配置 | Kustomize、Filebeat、Grafana provisioning | `make config-check` | 构建/内置检查通过 |
-| E2E | demo→Filebeat→Kafka→Go→ES→Grafana | `make smoke` | N 条输入、N 条唯一结果、必填字段 |
+| 集成 | Kafka 消费者、Elasticsearch 幂等写入 | `make test-integration` | 固定输入、唯一文档数、错误结果 |
+| 配置 | Kustomize、Filebeat、Grafana 自动配置 | `make config-check` | 构建/内置检查通过 |
+| 端到端 | 演示程序→Filebeat→Kafka→Go→Elasticsearch→Grafana | `make smoke` | N 条输入、N 条唯一结果、必填字段 |
 | 恢复 | processor/Kafka/demo Pod 故障 | `make verify-recovery` | 恢复时间、丢失数、重复文档数 |
 | 性能 | 吞吐与端到端延迟 | `make perf` | 环境、参数、p50/p95/p99、错误率 |
 
-这些 `make` 目标应在对应能力实现时逐个加入；Day 1 不要创建永远返回成功的占位脚本。
+这些 `make` 目标应在对应能力实现时逐个加入；第 1 天不要创建永远返回成功的占位脚本。
 
 ### 10.1 UC-001 完成定义
 
@@ -726,14 +726,14 @@ gh auth status
 - Grafana 可按时间、服务和关键词检索。
 - 明细、级别占比和异常趋势使用同一数据源，数量可核对。
 - 无匹配数据时页面可理解，不报系统错误。
-- 数据源和 dashboard 由仓库文件自动恢复。
+- 数据源和仪表盘由仓库文件自动恢复。
 - 固定数据规模下的响应时间有重复测量结果。
 
 ### 10.3 发布完成定义
 
 - `go test -race ./...`、`go vet ./...`、格式检查通过。
 - 核心纯逻辑包覆盖率建议 ≥80%，但不为数字编写无意义测试。
-- 空 namespace 可部署、验收、清理。
+- 空命名空间可部署、验收、清理。
 - README、需求、架构、ADR、部署、测试、性能、复盘齐全。
 - GitHub PR 和提交历史可读。
 - 仓库中没有密钥、真实通知地址、二进制、日志、ES 数据和本机配置。
@@ -754,7 +754,7 @@ Codex 每次只推进一个最小步骤，并按以下顺序回答：
 5. **复盘问题**：让你用自己的话解释关键机制。
 6. **下一步**：当前验证通过后才进入。
 
-除非你明确说“请直接实现”，Codex 不一次性写完一个用例。你贴出命令结果或 diff 后，Codex 应先审查证据，再给下一步。
+除非你明确说“请直接实现”，Codex 不一次性写完一个用例。你贴出命令结果或差异后，Codex 应先审查证据，再给下一步。
 
 ### 11.2 Codex 编码边界
 
@@ -773,9 +773,9 @@ Codex 每次只推进一个最小步骤，并按以下顺序回答：
 **一天开始**
 
 ```text
-请按导师模式开始 Day N。先读取 AGENTS.md、docs/PLAN.md 和
+请按导师模式开始第 N 天。先读取 AGENTS.md、docs/PLAN.md 和
 docs/PROJECT_STATE.md，再检查 git status、最近 5 个提交和当前 Kubernetes
-context。不要改代码。先用 8 行以内告诉我：当前状态、今日出口、第一
+上下文。不要改代码。先用 8 行以内告诉我：当前状态、今日出口、第一
 个最小步骤、验证命令和需要我理解的概念。
 ```
 
@@ -789,14 +789,14 @@ context。不要改代码。先用 8 行以内告诉我：当前状态、今日�
 **让我先实现**
 
 ```text
-给我接口、输入输出、失败测试和文件范围，不给完整实现。我完成后把 diff
+给我接口、输入输出、失败测试和文件范围，不给完整实现。我完成后把差异
 和测试结果发给你审查。
 ```
 
 **审查**
 
 ```text
-请审查当前 diff，只关注本用例的正确性、简洁性、错误边界和测试缺口。
+请审查当前差异，只关注本用例的正确性、简洁性、错误边界和测试缺口。
 先列必须修复项，再列可选改进；不要直接改文件。
 ```
 
@@ -812,7 +812,7 @@ context。不要改代码。先用 8 行以内告诉我：当前状态、今日�
 ```text
 请执行收尾检查，更新 docs/PROJECT_STATE.md：记录当前分支、最后绿灯提交、
 已完成验收、实际命令与结果、阻塞、未验证假设和下一唯一动作。然后建议
-一个 Conventional Commit；未经我确认不要 push 或 merge。
+一个约定式提交；未经我确认不要推送或合并。
 ```
 
 ## 12. 上下文压缩后仍保持专注
@@ -835,37 +835,37 @@ context。不要改代码。先用 8 行以内告诉我：当前状态、今日�
 推荐模板：
 
 ````md
-# Project State
+# 项目状态
 
-- Updated: YYYY-MM-DD HH:mm +08:00
-- Current day/use case:
-- Active branch:
-- Last green commit:
-- Working tree:
+- 更新时间：YYYY-MM-DD HH:mm +08:00
+- 当前天数/用例：
+- 当前分支：
+- 最后绿灯提交：
+- 工作区：
 
-## Completed and verified
+## 已完成并验证
 
 - 行为：
   - 验证命令：
   - 结果：
 
-## Current blocker
+## 当前阻塞
 
 - 无；或写唯一阻塞及证据。
 
-## Decisions since last checkpoint
+## 自上次检查点以来的决策
 
 - 决策、原因、对应 ADR。
 
-## Unverified assumptions
+## 未验证假设
 
 - 尚未验证但可能影响下一步的事实。
 
-## Next single action
+## 唯一下一步
 
 - 只写一个可在 30～60 分钟内验证的动作。
 
-## Resume commands
+## 恢复命令
 
 ```bash
 git status --short
@@ -893,7 +893,7 @@ git log -5 --oneline
 请执行项目恢复，不要立即编码：
 1. 读取 AGENTS.md、docs/PLAN.md、docs/PROJECT_STATE.md 和相关 ADR；
 2. 检查 git status --short、git log -5 --oneline；
-3. 确认 kubectl context，不修改集群；
+3. 确认 kubectl 上下文，不修改集群；
 4. 运行 PROJECT_STATE 中最快的相关验证；
 5. 输出当前用例、已验证事实、工作区差异、阻塞、下一唯一动作。
 如果聊天摘要与仓库事实冲突，以仓库和测试结果为准，并指出冲突。
@@ -901,88 +901,84 @@ git log -5 --oneline
 
 ### 12.5 建议的根目录 `AGENTS.md`
 
-Day 1 将下面内容复制到新仓库根目录，再把命令与路径更新为真实值：
+第 1 天将下面内容复制到新仓库根目录，再把命令与路径更新为真实值：
 
 ```md
-# Repository Guidance
+# 仓库协作指南
 
-## Mission
+## 目标
 
-Build the Stage 3 distributed log platform by use case. UC-001 and UC-002 are
-mandatory. Keep the implementation small, observable, tested, and reproducible
-on the local WSL2 Minikube environment.
+按用例构建阶段三分布式日志平台。UC-001 和 UC-002 是必做项。
+实现应保持小巧、可观测、经过测试，并能在本地 WSL2 Minikube 环境复现。
 
-## Read first
+## 开始前阅读
 
-- Read `docs/PLAN.md` for scope and sequence.
-- Read `docs/PROJECT_STATE.md` for the last verified state and next action.
-- Read the relevant ADR before changing pipeline semantics.
-- Treat repository state and test output as more reliable than chat memory.
+- 阅读 `docs/PLAN.md`，了解范围和顺序。
+- 阅读 `docs/PROJECT_STATE.md`，了解最后验证状态和下一步。
+- 修改管道语义前阅读相关 ADR。
+- 仓库状态和测试输出比聊天记忆更可靠。
 
-## Working protocol
+## 工作协议
 
-- Default to mentor mode: explain one small step, let the learner act, then
-  review evidence. Implement directly only when explicitly requested.
-- Work on one use case or one failing test at a time.
-- Before edits, name the files and the intended behavior.
-- After a material verification or decision, update `docs/PROJECT_STATE.md`.
-- Before ending a day or compacting context, record the last green commit,
-  commands and results, blockers, assumptions, and one next action.
+- 默认采用导师模式：解释一个小步骤，让学习者操作，再审查证据。
+  只有收到明确要求时才直接实现。
+- 每次只处理一个用例或一个失败测试。
+- 编辑前说明文件和预期行为。
+- 重要验证或决策后更新 `docs/PROJECT_STATE.md`。
+- 每天结束或压缩上下文前，记录最后绿灯提交、命令和结果、阻塞、
+  假设以及唯一下一步。
 
-## Architecture invariants
+## 架构不变量
 
-- Core flow: Pod stdout -> Filebeat DaemonSet -> Kafka -> Go log-processor ->
-  Elasticsearch -> Grafana.
-- Filebeat never writes directly to Elasticsearch in the core flow.
-- Kafka-to-Elasticsearch processing belongs to `log-processor`.
-- Grafana queries Elasticsearch directly in v0.1.0; do not add a query API
-  without an accepted requirement.
-- Delivery is at least once. Use a deterministic event ID and idempotent ES
-  document ID; never claim unrestricted exactly-once delivery.
-- UC-003 starts only after UC-001/UC-002 acceptance is green. UC-004 is out of
-  the current implementation scope.
+- 核心链路：Pod 标准输出 → Filebeat DaemonSet → Kafka → Go `log-processor`
+  → Elasticsearch → Grafana。
+- Filebeat 在核心链路中绝不直接写入 Elasticsearch。
+- Kafka 到 Elasticsearch 的处理归 `log-processor` 负责。
+- `v0.1.0` 中 Grafana 直接查询 Elasticsearch；没有已接受的需求时，
+  不增加查询接口。
+- 投递语义为至少一次。使用确定性事件标识和幂等的 Elasticsearch
+  文档标识；绝不宣称不受限制的精确一次投递。
+- 只有 UC-001/UC-002 验收全绿后才开始 UC-003。UC-004 不在当前实现范围内。
 
-## Go rules
+## Go 规则
 
-- Prefer the standard library; use `log/slog` and `net/http`.
-- Add a dependency only with a concrete need and record important choices.
-- Keep interfaces at external boundaries only.
-- Use context cancellation and graceful shutdown for background work.
-- Classify retryable errors, permanent errors, and poison messages.
-- Add focused tests with behavior changes; prefer table-driven tests.
-- Avoid speculative abstractions, generic utility packages, and duplicate DTOs.
+- 优先使用标准库；使用 `log/slog` 和 `net/http`。
+- 只有存在具体需要时才增加依赖，并记录重要选择。
+- 接口只放在外部边界。
+- 后台任务使用上下文取消和优雅退出。
+- 区分可重试错误、永久错误和毒消息。
+- 行为变化时增加聚焦测试，优先使用表驱动测试。
+- 避免臆测式抽象、通用工具包和重复的数据传输对象。
 
-## Kubernetes rules
+## Kubernetes 规则
 
-- Target the documented local Minikube context and a dedicated namespace.
-- Use Kustomize; pin image versions; never use `latest`.
-- Do not commit real secrets.
-- Add probes and resource requests/limits to custom Deployments.
-- Exclude Filebeat and infrastructure logs from the collection allowlist.
-- Do not mutate or delete cluster resources outside the project namespace.
+- 使用文档规定的本地 Minikube 上下文和独立命名空间。
+- 使用 Kustomize；固定镜像版本；绝不使用 `latest`。
+- 不提交真实密钥。
+- 为自研 Deployment 添加探针、资源请求和上限。
+- 从采集允许列表中排除 Filebeat 和基础设施日志。
+- 不修改或删除项目命名空间以外的集群资源。
 
-## Verification
+## 验证
 
-- Fast checks: `make fmt-check`, `make vet`, `make test`.
-- Integration/E2E checks exist only after implemented: `make test-integration`,
-  `make smoke`, `make verify-recovery`, `make perf`.
-- Never create placeholder checks that always pass.
-- Report exact commands and outcomes; do not say “works” without evidence.
+- 快速检查：`make fmt-check`、`make vet`、`make test`。
+- 集成和端到端能力实现后才加入对应检查：`make test-integration`、
+  `make smoke`、`make verify-recovery`、`make perf`。
+- 绝不创建永远通过的占位检查。
+- 报告准确命令和结果；没有证据时不说“可用”。
 
-## Git and external actions
+## Git 与外部操作
 
-- Use `main`, `develop`, and one focused `feature/*` branch.
-- Use Conventional Commits.
-- Do not push, merge, publish, create a remote repository, make it public, or
-  change external services without explicit authorization in the current turn.
-- Never commit credentials, generated logs, data volumes, binaries, or local
-  environment files.
+- 使用 `main`、`develop` 和一个聚焦的 `feature/*` 分支。
+- 使用约定式提交。
+- 未在当前轮次获得明确授权时，不推送、不合并、不发布、不创建或公开
+  远端仓库，也不更改外部服务。
+- 绝不提交凭据、生成日志、数据卷、二进制或本机环境文件。
 
-## Definition of done
+## 完成定义
 
-A change is done only when its acceptance behavior is verified, relevant tests
-pass, configuration remains reproducible, docs/state are current, and the diff
-contains no unrelated work.
+只有验收行为已验证、相关测试通过、配置仍可复现、文档和状态保持最新，
+且差异中不含无关工作时，修改才算完成。
 ```
 
 ### 12.6 对话边界
@@ -996,21 +992,21 @@ contains no unrelated work.
 
 | 风险 | 早期信号 | 处理 |
 |---|---|---|
-| WSL/Minikube 资源不足 | ES/Kafka OOM、Pod 虽调度成功却频繁重启 | 为 `stage3-logs` 分配 6 GiB、基础设施采用单节点和小 heap，有实际 OOM 证据再升级 |
-| Go PATH 只在登录 shell 生效 | IDE 或脚本找不到 Go | 修正 shell PATH，再验证 `command -v go`；不重复安装 |
-| Kafka advertised listener 错误 | 集群内能解析服务但客户端拿到不可达地址 | 只先支持集群内客户端，记录 listener/Service 关系 |
-| Filebeat 递归采集 | 日志量快速增长且来源是 Filebeat/Kafka | 使用 namespace/label allowlist，显式排除基础设施 |
-| 至少一次导致重复 | 重启后 ES 数量大于输入数 | 稳定 event ID、ES `_id`、重复投递集成测试 |
-| 毒消息阻塞分区 | 同一 offset 无限报错，后续无进展 | DLQ 或明确的永久错误处理，并有计数和测试 |
-| HPA 扩容但吞吐不变 | 多个 consumer Pod 中只有少数工作 | 检查 topic 分区数；副本数不超过有效分区数 |
-| 版本不兼容 | Grafana 数据源失败、客户端协议错误 | Day 1 固定版本矩阵并做最小兼容性冒烟；客户端与 ES major 对齐 |
-| 范围失控 | Day 3 仍在搭可选组件 | 按用例门禁；删除查询 API、Jaeger、AI 等非核心项 |
-| GitHub 凭据混乱 | Windows gh 登录但 WSL push 失败 | 分开检查远端创建和 WSL Git 认证；不复制 token 到命令 |
+| WSL/Minikube 资源不足 | Elasticsearch/Kafka 内存不足、Pod 虽调度成功却频繁重启 | 为 `stage3-logs` 分配 6 GiB、基础设施采用单节点和小内存堆，有实际内存不足证据再升级 |
+| Go 路径只在登录终端生效 | 开发工具或脚本找不到 Go | 修正终端路径，再验证 `command -v go`；不重复安装 |
+| Kafka 对外通告监听地址错误 | 集群内能解析服务但客户端拿到不可达地址 | 只先支持集群内客户端，记录监听地址与 Service 的关系 |
+| Filebeat 递归采集 | 日志量快速增长且来源是 Filebeat/Kafka | 使用命名空间和标签允许列表，显式排除基础设施 |
+| 至少一次导致重复 | 重启后 Elasticsearch 数量大于输入数 | 稳定事件标识、Elasticsearch `_id`、重复投递集成测试 |
+| 毒消息阻塞分区 | 同一位点无限报错，后续无进展 | 死信队列或明确的永久错误处理，并有计数和测试 |
+| HPA 扩容但吞吐不变 | 多个消费者 Pod 中只有少数工作 | 检查主题分区数；副本数不超过有效分区数 |
+| 版本不兼容 | Grafana 数据源失败、客户端协议错误 | 第 1 天固定版本矩阵并做最小兼容性冒烟；客户端与 Elasticsearch 主版本对齐 |
+| 范围失控 | 第 3 天仍在搭可选组件 | 按用例门禁；删除查询接口、Jaeger、人工智能等非核心项 |
+| GitHub 凭据混乱 | Windows `gh` 已登录但 WSL 推送失败 | 分开检查远端创建和 WSL Git 认证；不复制令牌到命令 |
 | 把单节点演示当高可用 | 只有 Pod 重启测试却写“高可用完成” | 报告只声明验证过的故障层级和边界 |
 
-## 14. Day 1 开始前的第一组命令
+## 14. 第 1 天开始前的第一组命令
 
-这些命令包含只读确认、已授权的新 profile 创建和项目目录创建。正式执行时让 Codex 一组一组带你做，不要整段盲贴：
+这些命令包含只读确认、已授权的新配置档创建和项目目录创建。正式执行时让 Codex 一组一组带你做，不要整段盲贴：
 
 ```bash
 # 在 PowerShell 进入目标发行版
@@ -1018,7 +1014,7 @@ wsl -d Ubuntu-24.04
 ```
 
 ```bash
-# 在 WSL 中确认基础资源、Docker 和 profile 状态
+# 在 WSL 中确认基础资源、Docker 和配置档状态
 whoami
 echo "$WSL_DISTRO_NAME"
 free -h
@@ -1028,7 +1024,7 @@ docker version
 minikube profile list
 ```
 
-确认 Docker 可用后，创建已确认的阶段三 profile：
+确认 Docker 可用后，创建已确认的阶段三配置档：
 
 ```bash
 minikube start -p stage3-logs \
@@ -1056,37 +1052,37 @@ git config --get user.name
 git config --get user.email
 ```
 
-到这里先停。把新 profile 与项目目录的输出交给 Codex 审查，再决定 Git 初始化、远端可见性、认证方式和首个文件。
+到这里先停。把新配置档与项目目录的输出交给 Codex 审查，再决定 Git 初始化、远端可见性、认证方式和首个文件。
 
 ## 15. 推荐阅读顺序
 
 只在当天需要时阅读，不要第一天把所有文档看完：
 
-- Day 1：
+- 第 1 天：
   - [Codex 的 AGENTS.md 指南](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
   - [Codex 的 WSL 指南](https://learn.chatgpt.com/docs/windows/wsl)
   - [GitHub CLI 创建仓库](https://cli.github.com/manual/gh_repo_create)
-- Day 2：
+- 第 2 天：
   - [Elastic：在 Kubernetes 上运行 Filebeat](https://www.elastic.co/docs/reference/beats/filebeat/running-on-kubernetes)
   - [Elastic：Filebeat Kafka output](https://www.elastic.co/docs/reference/beats/filebeat/kafka-output)
   - [Elastic：Filebeat 的至少一次投递与 registry](https://www.elastic.co/docs/reference/beats/filebeat/how-filebeat-works)
-- Day 3：
-  - 选定 Kafka Go 客户端和 Elasticsearch major 后，只阅读对应版本的官方文档。
+- 第 3 天：
+  - 选定 Kafka Go 客户端和 Elasticsearch 主版本后，只阅读对应版本的官方文档。
   - [Go：集成测试覆盖率](https://go.dev/doc/build-cover)
-- Day 4：
+- 第 4 天：
   - [Grafana：Elasticsearch 数据源](https://grafana.com/docs/grafana/latest/datasources/elasticsearch/)
   - [Grafana：配置 Elasticsearch 数据源](https://grafana.com/docs/grafana/latest/datasources/elasticsearch/configure/)
-- Day 6：
+- 第 6 天：
   - [Kubernetes：Horizontal Pod Autoscaling](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/)
   - [Kubernetes：HPA 演练](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale-walkthrough/)
 
 ## 16. 现在的下一步
 
-下一次对话先完成 Day 1 环境确认并创建 `stage3-logs`，随后再处理仓库，不写 Kafka 或 Elasticsearch：
+下一次对话先完成第 1 天环境确认并创建 `stage3-logs`，随后再处理仓库，不写 Kafka 或 Elasticsearch：
 
 ```text
 请按《项目三-分布式可扩展日志分析平台-开发与Codex协作指南》的导师模式，
-带我开始 Day 1。我已经确认按第 2.1 节创建新的 stage3-logs profile。
+带我开始第 1 天。我已经确认按第 2.1 节创建新的 stage3-logs 配置档。
 先让我运行第 14 节状态检查；确认 Docker 和资源满足要求后，再指导我创建
 并验证 stage3-logs，这项操作不必再次询问许可。
 
