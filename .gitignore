@@ -1,0 +1,24 @@
+# Go build and test output
+/bin/
+/dist/
+/coverage/
+*.test
+*.out
+*.prof
+
+# Local runtime output
+*.log
+/.local/
+/.tmp/
+
+# Local environment and secret values
+.env
+.env.*
+!.env.example
+*.secret.local.*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
