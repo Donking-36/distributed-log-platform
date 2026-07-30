@@ -22,3 +22,8 @@
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 仅供本地 Codex 协作使用
+/AGENTS.md
+/docs/PLAN.md
+/docs/PROJECT_STATE.md
