@@ -42,16 +42,13 @@ UC-004、生产级多节点高可用、多租户、自研网页界面和重复�
 Kafka、Filebeat、Elasticsearch 和 Grafana 的镜像版本暂不选定，需先通过
 兼容性冒烟测试。任何部署清单都不得使用 `latest`。
 
-## 首先阅读
+## 项目文档
 
-1. [`AGENTS.md`](AGENTS.md) — 长期有效的工程与协作规则。
-2. [`docs/PLAN.md`](docs/PLAN.md) — 完整范围和分阶段实施计划。
-3. [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md) — 最后验证状态和唯一下一步。
-4. [`docs/requirements.md`](docs/requirements.md) — UC-001/UC-002 验收要求。
-5. [`docs/architecture.md`](docs/architecture.md) 和
-   [`docs/adr/`](docs/adr/) — 架构和已接受的决策。
+- [`docs/requirements.md`](docs/requirements.md)：UC-001/UC-002 的范围、日志契约和验收要求。
+- [`docs/architecture.md`](docs/architecture.md)：组件职责、部署拓扑和兼容性门禁。
+- [`docs/adr/`](docs/adr/)：核心链路、投递语义和幂等策略等架构决策。
 
-## 安全恢复工作
+## 本地开发前检查
 
 ```bash
 cd ~/projects/distributed-log-platform
@@ -61,8 +58,8 @@ kubectl config current-context
 kubectl --context=stage3-logs get nodes
 ```
 
-不得修改其他 Kubernetes 上下文。若 Minikube 重建其外层容器，应重新核验
-`docs/PROJECT_STATE.md` 中记录的 4 CPU/6 GiB 限制。
+确认当前 Kubernetes 上下文为 `stage3-logs`，且节点处于就绪状态。若
+Minikube 重建外层容器，应重新核验 4 CPU 和 6 GiB 内存限制。
 
 ## 开发流程
 
@@ -70,10 +67,10 @@ kubectl --context=stage3-logs get nodes
 - 当前启动工作分支：`feature/bootstrap`。
 - 使用目标单一的 `feature/*` 分支和约定式提交。
 - 只为真实行为添加测试和命令目标，不建立永远成功的占位检查。
-- GitHub 仓库创建和推送由用户执行。
+- 远端仓库为 `https://github.com/Donking-36/distributed-log-platform.git`。
 
 ## 当前状态
 
-环境、容量门禁、需求、架构和 ADR 基线已经完成。远端仓库由用户创建，但本地
-尚未配置 `origin`，也没有推送任何内容。应用代码、Makefile 目标、持续集成和部署
+环境、容量门禁、需求、架构、ADR 和 Go 模块基线已经完成。
+`feature/bootstrap` 已推送到远端。应用代码、Makefile 目标、持续集成和部署
 清单尚未创建。
