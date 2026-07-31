@@ -52,6 +52,7 @@ Kafka、Filebeat、Elasticsearch 和 Grafana 的镜像版本暂不选定，需�
 | `PRODUCER_SERVICE_NAME` | 是 | 无 | Kubernetes 中由 Pod `service` 标签通过 Downward API 注入，写入原始 `service.name` |
 | `PRODUCER_TEST_RUN_ID` | 是 | 无 | 标识一次可重复验收批次 |
 | `PRODUCER_COUNT` | 否 | `20` | 本次生成的事件数量，必须大于零 |
+| `PRODUCER_INTERVAL` | 否 | `1s` | 相邻事件的固定间隔，使用 Go duration 且必须大于零；第一条立即输出 |
 
 本地生成两条日志：
 
@@ -59,6 +60,7 @@ Kafka、Filebeat、Elasticsearch 和 Grafana 的镜像版本暂不选定，需�
 PRODUCER_SERVICE_NAME=api-service \
 PRODUCER_TEST_RUN_ID=local-001 \
 PRODUCER_COUNT=2 \
+PRODUCER_INTERVAL=10ms \
 go run ./cmd/log-producer
 ```
 
@@ -97,14 +99,13 @@ make check
 ## 开发流程
 
 - 长期分支：`main`、`develop`。
-- 当前启动工作分支：`feature/bootstrap`。
-- 使用目标单一的 `feature/*` 分支和约定式提交。
+- 功能开发从 `develop` 创建目标单一的 `feature/*` 分支，并使用约定式提交。
 - 只为真实行为添加测试和命令目标，不建立永远成功的占位检查。
 - 远端仓库为 `https://github.com/Donking-36/distributed-log-platform.git`。
 
 ## 当前状态
 
 环境、容量门禁、需求、架构、ADR 和 Go 模块基线已经完成。`log-producer`
-已经实现配置加载、确定性 JSON 输出和可测试入口，并通过单元测试、静态检查、
-构建与本地运行冒烟。最小持续集成工作流已配置为执行 `make check`，托管
-运行待首次推送后验证；容器镜像和 Kubernetes 部署清单尚未创建。
+已经实现配置加载、确定性 JSON 输出、固定发送间隔和可取消等待，并通过
+单元测试、静态检查、构建与本地运行冒烟。最小持续集成工作流和首个受保护
+PR 均已验证；容器镜像和 Kubernetes 部署清单尚未创建。

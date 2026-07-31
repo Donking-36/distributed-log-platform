@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,16 +18,25 @@ type logEvent struct {
 	TestRunID   string `json:"test_run_id"`
 }
 
+// waitFunc 抽象两条事件之间的等待边界，使发送节奏无需依赖真实睡眠即可测试。
+type waitFunc func(context.Context, time.Duration) error
+
 // writeEvents 按顺序生成指定数量的日志事件并逐行写入 output。
-// now 由调用方注入，确保时间相关行为可以被确定性测试。
+// 第一条事件立即写出，后续事件只在可取消的固定间隔后写出。
 func writeEvents(
+	ctx context.Context,
 	output io.Writer,
 	cfg config,
 	now func() time.Time,
+	wait waitFunc,
 ) error {
 	encoder := json.NewEncoder(output)
 
 	for sequence := 1; sequence <= cfg.Count; sequence++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("before event %d: %w", sequence, err)
+		}
+
 		event := logEvent{
 			Timestamp: now().UTC().Format(
 				time.RFC3339Nano,
@@ -45,7 +55,31 @@ func writeEvents(
 				err,
 			)
 		}
+
+		if sequence == cfg.Count {
+			continue
+		}
+		if err := wait(ctx, cfg.Interval); err != nil {
+			return fmt.Errorf(
+				"wait before event %d: %w",
+				sequence+1,
+				err,
+			)
+		}
 	}
 
 	return nil
+}
+
+// waitForInterval 使用独立计时器等待下一条事件，并同时监听进程取消信号。
+func waitForInterval(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
