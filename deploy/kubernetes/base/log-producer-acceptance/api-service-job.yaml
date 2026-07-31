@@ -1,36 +1,33 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: api-service
+  name: api-service-acceptance
   labels:
     app.kubernetes.io/name: log-producer
-    app.kubernetes.io/instance: api-service
+    app.kubernetes.io/instance: api-service-acceptance
     app.kubernetes.io/component: log-source
     app.kubernetes.io/part-of: distributed-log-platform
+    distributed-log-platform.io/purpose: acceptance
 spec:
-  replicas: 1
-  revisionHistoryLimit: 2
-  progressDeadlineSeconds: 60
-  minReadySeconds: 5
-  # 避免更新期间两个同服务 Pod 同时从序号 1 开始输出。
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: log-producer
-      app.kubernetes.io/instance: api-service
+  completions: 1
+  parallelism: 1
+  # 验收失败时不自动生成第二批日志，保证输出数量的故障边界清晰。
+  backoffLimit: 0
+  activeDeadlineSeconds: 60
   template:
     metadata:
       labels:
         app.kubernetes.io/name: log-producer
-        app.kubernetes.io/instance: api-service
+        app.kubernetes.io/instance: api-service-acceptance
         app.kubernetes.io/component: log-source
         app.kubernetes.io/part-of: distributed-log-platform
+        distributed-log-platform.io/purpose: acceptance
         # service 是日志身份和后续 Filebeat 路由的权威来源。
         service: api-service
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      restartPolicy: Never
       terminationGracePeriodSeconds: 10
       securityContext:
         runAsNonRoot: true
@@ -42,9 +39,6 @@ spec:
         - name: log-producer
           image: distributed-log-platform/log-producer:unconfigured
           imagePullPolicy: IfNotPresent
-          envFrom:
-            - configMapRef:
-                name: log-producer-runtime
           env:
             # Downward API 保证进程配置与受控 Pod 标签一致。
             - name: PRODUCER_SERVICE_NAME
@@ -52,6 +46,10 @@ spec:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: metadata.labels['service']
+            - name: PRODUCER_COUNT
+              value: "20"
+            - name: PRODUCER_INTERVAL
+              value: 50ms
           resources:
             requests:
               cpu: 10m

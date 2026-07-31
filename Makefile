@@ -3,6 +3,7 @@
 GO ?= go
 GOFMT ?= gofmt
 DOCKER ?= docker
+PYTHON ?= python3
 KUBECTL ?= kubectl
 GO_VERSION := 1.26.5
 EXPECTED_GO_VERSION := go$(GO_VERSION)
@@ -12,8 +13,12 @@ IMAGE_TAG ?= dev
 KUBE_CONTEXT ?= stage3-logs
 KUBE_NAMESPACE ?= stage3-logs
 KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
+KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
+ACCEPTANCE_RUN_ID ?=
+ACCEPTANCE_TIMEOUT ?= 60s
 
-.PHONY: check version-check fmt fmt-check vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status
+.PHONY: check version-check fmt fmt-check vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
+	k8s-acceptance-render k8s-acceptance
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
 check: version-check fmt-check vet test build
@@ -116,3 +121,18 @@ k8s-status:
 		-n $(KUBE_NAMESPACE) \
 		-l app.kubernetes.io/name=log-producer \
 		-o wide
+
+# k8s-acceptance-render 只渲染两个一次性 Job；批次 ID 必须由运行入口注入。
+k8s-acceptance-render:
+	@$(KUBECTL) kustomize $(KUSTOMIZE_ACCEPTANCE_OVERLAY)
+
+# k8s-acceptance 生成或接收唯一批次 ID，重建两个已终止 Job 并验证各 20 条日志。
+k8s-acceptance: export ACCEPTANCE_RUN_ID := $(ACCEPTANCE_RUN_ID)
+k8s-acceptance: export ACCEPTANCE_TIMEOUT := $(ACCEPTANCE_TIMEOUT)
+k8s-acceptance: export KUBECTL := $(KUBECTL)
+k8s-acceptance: export PYTHON := $(PYTHON)
+k8s-acceptance: export KUBE_CONTEXT := $(KUBE_CONTEXT)
+k8s-acceptance: export KUBE_NAMESPACE := $(KUBE_NAMESPACE)
+k8s-acceptance: export KUSTOMIZE_ACCEPTANCE_OVERLAY := $(KUSTOMIZE_ACCEPTANCE_OVERLAY)
+k8s-acceptance: k8s-context-check
+	@scripts/run-log-producer-acceptance.sh

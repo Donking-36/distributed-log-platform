@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: stage3-logs
+
+resources:
+  - ../../base/log-producer-acceptance
+
+# 本地验收只使用已旁加载到 stage3-logs 的固定提交镜像。
+patches:
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      labelSelector: distributed-log-platform.io/purpose=acceptance
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

@@ -5,10 +5,9 @@ resources:
   - api-service-deployment.yaml
   - worker-service-deployment.yaml
 
-# 最终镜像标签只在一处维护，避免两个 Deployment 漂移。
-images:
-  - name: distributed-log-platform/log-producer
-    newTag: d20fc7f
+# Deployment 与验收 Job 通过同一 Component 获得固定镜像。
+components:
+  - ../../components/log-producer-image
 
 configMapGenerator:
   - name: log-producer-runtime

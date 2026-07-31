@@ -6,6 +6,10 @@
 *.out
 *.prof
 
+# Python validation cache
+__pycache__/
+*.py[cod]
+
 # Local runtime output
 *.log
 /.local/
