@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfigUsesEnvironment(t *testing.T) {
@@ -10,6 +11,7 @@ func TestLoadConfigUsesEnvironment(t *testing.T) {
 		"PRODUCER_SERVICE_NAME": " api-service ",
 		"PRODUCER_TEST_RUN_ID":  " run-001 ",
 		"PRODUCER_COUNT":        " 8 ",
+		"PRODUCER_INTERVAL":     " 250ms ",
 	}
 
 	cfg, err := loadConfig(lookupEnvFrom(values))
@@ -34,9 +36,16 @@ func TestLoadConfigUsesEnvironment(t *testing.T) {
 	if cfg.Count != 8 {
 		t.Errorf("Count = %d, want 8", cfg.Count)
 	}
+	if cfg.Interval != 250*time.Millisecond {
+		t.Errorf(
+			"Interval = %s, want %s",
+			cfg.Interval,
+			250*time.Millisecond,
+		)
+	}
 }
 
-func TestLoadConfigUsesDefaultCount(t *testing.T) {
+func TestLoadConfigUsesDefaults(t *testing.T) {
 	values := map[string]string{
 		"PRODUCER_SERVICE_NAME": "api-service",
 		"PRODUCER_TEST_RUN_ID":  "run-001",
@@ -49,6 +58,9 @@ func TestLoadConfigUsesDefaultCount(t *testing.T) {
 
 	if cfg.Count != 20 {
 		t.Errorf("Count = %d, want 20", cfg.Count)
+	}
+	if cfg.Interval != time.Second {
+		t.Errorf("Interval = %s, want %s", cfg.Interval, time.Second)
 	}
 }
 
@@ -98,6 +110,42 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 				"PRODUCER_COUNT":        "-1",
 			},
 			wantMessage: "PRODUCER_COUNT must be greater than zero",
+		},
+		{
+			name: "empty interval",
+			values: map[string]string{
+				"PRODUCER_SERVICE_NAME": "api-service",
+				"PRODUCER_TEST_RUN_ID":  "run-001",
+				"PRODUCER_INTERVAL":     " ",
+			},
+			wantMessage: "PRODUCER_INTERVAL must be a valid duration",
+		},
+		{
+			name: "invalid interval",
+			values: map[string]string{
+				"PRODUCER_SERVICE_NAME": "api-service",
+				"PRODUCER_TEST_RUN_ID":  "run-001",
+				"PRODUCER_INTERVAL":     "fast",
+			},
+			wantMessage: "PRODUCER_INTERVAL must be a valid duration",
+		},
+		{
+			name: "zero interval",
+			values: map[string]string{
+				"PRODUCER_SERVICE_NAME": "api-service",
+				"PRODUCER_TEST_RUN_ID":  "run-001",
+				"PRODUCER_INTERVAL":     "0s",
+			},
+			wantMessage: "PRODUCER_INTERVAL must be greater than zero",
+		},
+		{
+			name: "negative interval",
+			values: map[string]string{
+				"PRODUCER_SERVICE_NAME": "api-service",
+				"PRODUCER_TEST_RUN_ID":  "run-001",
+				"PRODUCER_INTERVAL":     "-1s",
+			},
+			wantMessage: "PRODUCER_INTERVAL must be greater than zero",
 		},
 	}
 
