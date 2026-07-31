@@ -69,6 +69,68 @@ func TestExecuteWritesConfiguredEvents(t *testing.T) {
 	}
 }
 
+func TestExecuteTreatsContinuousCancellationAsSuccess(t *testing.T) {
+	values := map[string]string{
+		"PRODUCER_SERVICE_NAME": "api-service",
+		"PRODUCER_TEST_RUN_ID":  "run-001",
+		"PRODUCER_COUNT":        "0",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	waitCalls := 0
+
+	err := execute(
+		ctx,
+		lookupEnvFrom(values),
+		io.Discard,
+		time.Now,
+		func(ctx context.Context, _ time.Duration) error {
+			waitCalls++
+			cancel()
+			return ctx.Err()
+		},
+	)
+	if err != nil {
+		t.Fatalf("execute() error = %v, want nil", err)
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait calls = %d, want 1", waitCalls)
+	}
+}
+
+func TestExecuteReturnsFiniteCancellation(t *testing.T) {
+	values := map[string]string{
+		"PRODUCER_SERVICE_NAME": "api-service",
+		"PRODUCER_TEST_RUN_ID":  "run-001",
+		"PRODUCER_COUNT":        "2",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	waitCalls := 0
+
+	err := execute(
+		ctx,
+		lookupEnvFrom(values),
+		io.Discard,
+		time.Now,
+		func(ctx context.Context, _ time.Duration) error {
+			waitCalls++
+			cancel()
+			return ctx.Err()
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf(
+			"execute() error = %v, want context canceled",
+			err,
+		)
+	}
+	if !strings.Contains(err.Error(), "write events") {
+		t.Fatalf("error = %q, want write events context", err)
+	}
+	if waitCalls != 1 {
+		t.Fatalf("wait calls = %d, want 1", waitCalls)
+	}
+}
+
 func TestExecuteReturnsConfigError(t *testing.T) {
 	values := map[string]string{
 		"PRODUCER_SERVICE_NAME": "api-service",

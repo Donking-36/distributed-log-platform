@@ -51,7 +51,7 @@ Kafka、Filebeat、Elasticsearch 和 Grafana 的镜像版本暂不选定，需�
 |---|---|---|---|
 | `PRODUCER_SERVICE_NAME` | 是 | 无 | Kubernetes 中由 Pod `service` 标签通过 Downward API 注入，写入原始 `service.name` |
 | `PRODUCER_TEST_RUN_ID` | 是 | 无 | 标识一次可重复验收批次 |
-| `PRODUCER_COUNT` | 否 | `20` | 本次生成的事件数量，必须大于零 |
+| `PRODUCER_COUNT` | 否 | `20` | 正数表示固定批次的事件数；`0` 表示持续发送直到收到退出信号；负数非法 |
 | `PRODUCER_INTERVAL` | 否 | `1s` | 相邻事件的固定间隔，使用 Go duration 且必须大于零；第一条立即输出 |
 
 本地生成两条日志：

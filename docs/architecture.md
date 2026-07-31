@@ -47,7 +47,7 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 
 | 组件 | Kubernetes 形态 | 职责 | 不承担的职责 |
 |---|---|---|---|
-| `log-producer` | 两个 Deployment | 产生可预测、带编号的 JSON 日志 | Kafka 或 Elasticsearch 客户端 |
+| `log-producer` | 两个持续 Deployment；固定批次验收另用 Job | 产生可预测、带编号的 JSON 日志 | Kafka 或 Elasticsearch 客户端 |
 | Filebeat | DaemonSet | 节点日志采集、补充 Kubernetes 元数据、受控的主题路由 | 业务转换或直接写入 Elasticsearch |
 | Kafka | 单节点 StatefulSet | 短时缓冲、按服务划分主题、提供重放边界 | 长期检索 |
 | `log-processor` | Deployment | 消费、校验、规范化、生成 `event_id`、写入 Elasticsearch | 通用查询接口 |
@@ -58,6 +58,12 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 客户端，只向标准输出写入 JSON；Filebeat 才负责将采集事件生产到 Kafka。
 程序和镜像统一使用 `log-producer`，两个运行实例的业务身份仍为
 `api-service`、`worker-service`。
+
+`PRODUCER_COUNT` 为正数时生成固定批次，为 `0` 时持续到 SIGTERM。Deployment
+使用持续模式，避免正常退出后被 `restartPolicy: Always` 反复拉起并重置序号；
+精确 20 条的 UC-001A 验收使用一次性 Job。两种形态复用同一镜像和事件契约，
+不在容器入口外包裹 `sleep`。持续模式收到取消信号后以退出码 0 结束；有限
+批次若在完成前被取消则返回非零退出码，使 Job 能识别失败并按策略重试。
 
 ### 3.1 Go 可执行程序内部组织
 
@@ -86,8 +92,11 @@ UC-001/UC-002 验收链路全绿之后。
   `kubectl port-forward`。
 - 有状态组件：Kafka 和 Elasticsearch 都使用单副本和开发级存储。
   这不是生产级高可用拓扑。
-- `log-producer` 和 `log-processor`：配置就绪/存活探针、资源请求/限制、
-  优雅终止，并以非根用户运行。
+- `log-processor`：配置就绪/存活探针、资源请求/限制、优雅终止，并以非根
+  用户运行。
+- `log-producer`：配置资源请求/限制、安全上下文和优雅终止。它没有 Service
+  或流量入口，进程退出已由 kubelet 感知，因此不添加固定成功、`kill -0 1`
+  或检查进程文件等无实际健康语义的探针；端到端日志到达由链路冒烟验证。
 - 第三方镜像：只有在验证所选镜像行为后才收紧安全上下文；例外情况必须记录。
 - Filebeat 只挂载必要的宿主机日志路径和 `registry` 路径，使用目标工作负载
   允许列表，并排除自身及基础设施日志。
