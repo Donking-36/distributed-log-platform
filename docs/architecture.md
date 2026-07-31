@@ -159,6 +159,9 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | 组件 | 版本状态 | 证据或门禁 |
 |---|---|---|
 | Go 工具链 | 已选定且本地验证：1.26.5 | `go version`；`go.mod` 和持续集成必须使用 Go 1.26.5 |
+| Go 构建镜像 | 已验证：`golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2` | 多阶段构建成功；`CGO_ENABLED=0`、`trimpath`、禁用 VCS 元数据 |
+| `log-producer` 运行基础镜像 | 已验证：`alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40` | UID/GID 10001、合法 JSON 输出和 SIGTERM 退出码 0 冒烟通过 |
+| `log-producer` 应用镜像 | 本地构建已验证；仅允许 `dev` 或干净工作区的当前提交短 SHA，提交标签按流程不覆盖 | `make image IMAGE_TAG=<当前提交短 SHA>`；镜像约 4.75 MB，不使用 `latest` |
 | Docker Engine | 本地已验证：29.6.2 | 客户端和服务端输出 |
 | Minikube | 本地已验证：1.38.1 | `minikube version` / 配置实例证据 |
 | Kubernetes | 集群已验证：v1.35.1 | `stage3-logs` 节点为 Ready |
