@@ -29,7 +29,7 @@ Pod 标准输出
 
 组件边界如下：
 
-1. `demo-app` 只向标准输出产生可预测的 JSON，绝不直接写入 Kafka 或
+1. `log-producer` 只向标准输出产生可预测的 JSON，绝不直接写入 Kafka 或
    Elasticsearch。
 2. Filebeat 只采集目标命名空间和工作负载，排除自身及基础设施日志，
    补充 Kubernetes 元数据，并依据允许列表中的 Pod `service` 标签进行
@@ -43,10 +43,14 @@ Pod 标准输出
 
 初始验收数据集采用以下约定：
 
-- 同一个演示镜像分别部署为 `demo-api` 和 `demo-worker`；
-- 主题为 `logs.demo-api` 和 `logs.demo-worker`；
+- 同一个日志源镜像分别部署为 `api-service` 和 `worker-service`；
+- 主题为 `logs.api-service` 和 `logs.worker-service`；
 - 每个业务主题有三个分区，副本因子为 1；
 - 使用稳定的 Pod UID 作为分区键；
+- Pod `service` 标签是服务身份和路由的权威来源，Deployment 通过
+  Downward API 把它注入 `PRODUCER_SERVICE_NAME`；
+- `log-processor` 校验原始 `service.name` 与权威标签是否一致，不一致的
+  事件进入 `logs.dlq`；
 - 未知或缺失的服务标签只能进入固定的 `logs.unclassified`，绝不据此动态
   创建主题。
 
@@ -80,7 +84,7 @@ Pod 标准输出
 
 - **Filebeat 直接写入 Elasticsearch：**这会去掉 Kafka，并绕过必需的
   Go 处理路径。
-- **`demo-app` 直接写入 Kafka 或 Elasticsearch：**这会让生产者与
+- **`log-producer` 直接写入 Kafka 或 Elasticsearch：**这会让生产者与
   基础设施耦合，并绕过节点级采集证据。
 - **增加 Logstash：**这会重复处理器的职责，并削弱 Go 学习目标。
 - **在 `v0.1.0` 中增加 Go 查询接口：**当前没有授权或隔离需求，这会与
@@ -95,8 +99,8 @@ Pod 标准输出
 
 ## 验证义务
 
-- `demo-api` 和 `demo-worker` 各自使用一个唯一 `test_run_id`，分别产生
-  20 条带编号的事件。
+- `api-service` 和 `worker-service` 共同使用同一个唯一 `test_run_id`，并分别
+  产生 20 条带编号的事件。
 - 临时 Kafka 消费者能在正确的服务主题中观察到全部 20 个预期的唯一序号，
   且不存在跨主题路由或 Filebeat 递归采集。
 - 缺失或未知服务标签的事件只进入 `logs.unclassified`，不会创建任意

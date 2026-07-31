@@ -24,7 +24,7 @@
 
 ```mermaid
 flowchart LR
-    A["demo-app Pod<br/>标准输出 JSON"]
+    A["log-producer Pod<br/>标准输出 JSON"]
     N["Kubernetes 节点<br/>容器日志文件"]
     F["Filebeat DaemonSet<br/>采集 + 补充元数据"]
     K[("Kafka<br/>logs.&lt;service&gt;")]
@@ -35,20 +35,42 @@ flowchart LR
     A --> N --> F --> K --> P --> E --> G
 ```
 
-`demo-api` 和 `demo-worker` 使用同一个 `demo-app` 镜像。受控的 Pod
-`service` 标签用于选择 `logs.demo-api` 或 `logs.demo-worker`；规范化后的
-事件字段为 `service.name`。
+`api-service` 和 `worker-service` 使用同一个 `log-producer` 镜像。受控的 Pod
+`service` 标签是服务身份和路由的权威来源，并通过 Downward API 注入
+`PRODUCER_SERVICE_NAME`。`log-producer` 将其写入原始 `service.name`，
+Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
+`log-processor` 校验两者一致后把标签规范化为最终 `service.name`。未知或
+缺失标签进入 `logs.unclassified`；已知标签与原始服务名不一致则进入
+`logs.dlq`。
 
 ## 3. 组件职责
 
 | 组件 | Kubernetes 形态 | 职责 | 不承担的职责 |
 |---|---|---|---|
-| `demo-app` | 两个 Deployment | 产生可预测、带编号的 JSON 日志 | Kafka 或 Elasticsearch 客户端 |
+| `log-producer` | 两个 Deployment | 产生可预测、带编号的 JSON 日志 | Kafka 或 Elasticsearch 客户端 |
 | Filebeat | DaemonSet | 节点日志采集、补充 Kubernetes 元数据、受控的主题路由 | 业务转换或直接写入 Elasticsearch |
 | Kafka | 单节点 StatefulSet | 短时缓冲、按服务划分主题、提供重放边界 | 长期检索 |
 | `log-processor` | Deployment | 消费、校验、规范化、生成 `event_id`、写入 Elasticsearch | 通用查询接口 |
 | Elasticsearch | 单节点 StatefulSet | 索引、全文检索、按时间/服务/级别聚合 | 消息队列语义 |
 | Grafana | Deployment | 检索界面、聚合面板、下钻 | 日志主存储 |
+
+`log-producer` 表示应用日志来源，不是 Kafka Producer：它不引入 Kafka
+客户端，只向标准输出写入 JSON；Filebeat 才负责将采集事件生产到 Kafka。
+程序和镜像统一使用 `log-producer`，两个运行实例的业务身份仍为
+`api-service`、`worker-service`。
+
+### 3.1 Go 可执行程序内部组织
+
+`log-producer` 当前只有命令入口这一个调用方，因此代码先保留在
+`cmd/log-producer` 的同一 Go 包内，但按职责拆分：
+
+- `main.go`：程序入口、依赖组装、生命周期和退出错误；
+- `config.go` 与 `config_test.go`：环境配置读取、默认值、校验及其测试；
+- `producer.go` 与 `producer_test.go`：事件结构、日志生成和确定性输出测试。
+
+这种组织避免入口文件承担业务行为，同时不为单一调用方提前增加包层次。只有
+出现第二个真实调用方或稳定的共享领域边界后，才把对应行为提取到
+`internal/`。
 
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。
@@ -64,7 +86,7 @@ UC-001/UC-002 验收链路全绿之后。
   `kubectl port-forward`。
 - 有状态组件：Kafka 和 Elasticsearch 都使用单副本和开发级存储。
   这不是生产级高可用拓扑。
-- `demo-app` 和 `log-processor`：配置就绪/存活探针、资源请求/限制、
+- `log-producer` 和 `log-processor`：配置就绪/存活探针、资源请求/限制、
   优雅终止，并以非根用户运行。
 - 第三方镜像：只有在验证所选镜像行为后才收紧安全上下文；例外情况必须记录。
 - Filebeat 只挂载必要的宿主机日志路径和 `registry` 路径，使用目标工作负载
@@ -82,8 +104,8 @@ Elasticsearch 使用小型开发堆内存、单副本和短保留期。具体资
 
 | 主题 | 分区数 | 复制因子 | 用途 |
 |---|---:|---:|---|
-| `logs.demo-api` | 3 | 1 | `demo-api` 事件 |
-| `logs.demo-worker` | 3 | 1 | `demo-worker` 事件 |
+| `logs.api-service` | 3 | 1 | `api-service` 事件 |
+| `logs.worker-service` | 3 | 1 | `worker-service` 事件 |
 | `logs.unclassified` | 1 | 1 | 未知或缺失服务标签的固定兜底主题 |
 | `logs.dlq` | 1 | 1 | 永久无效事件和处理证据 |
 

@@ -42,6 +42,26 @@ UC-004、生产级多节点高可用、多租户、自研网页界面和重复�
 Kafka、Filebeat、Elasticsearch 和 Grafana 的镜像版本暂不选定，需先通过
 兼容性冒烟测试。任何部署清单都不得使用 `latest`。
 
+## 当前可运行组件
+
+`log-producer` 是应用日志来源，只向标准输出写入一行一个 JSON 对象，不直接
+连接 Kafka 或 Elasticsearch。Filebeat 后续负责采集这些日志并生产到 Kafka。
+
+| 环境变量 | 必填 | 默认值 | 作用 |
+|---|---|---|---|
+| `PRODUCER_SERVICE_NAME` | 是 | 无 | Kubernetes 中由 Pod `service` 标签通过 Downward API 注入，写入原始 `service.name` |
+| `PRODUCER_TEST_RUN_ID` | 是 | 无 | 标识一次可重复验收批次 |
+| `PRODUCER_COUNT` | 否 | `20` | 本次生成的事件数量，必须大于零 |
+
+本地生成两条日志：
+
+```bash
+PRODUCER_SERVICE_NAME=api-service \
+PRODUCER_TEST_RUN_ID=local-001 \
+PRODUCER_COUNT=2 \
+go run ./cmd/log-producer
+```
+
 ## 项目文档
 
 - [`docs/requirements.md`](docs/requirements.md)：UC-001/UC-002 的范围、日志契约和验收要求。
@@ -61,6 +81,19 @@ kubectl --context=stage3-logs get nodes
 确认当前 Kubernetes 上下文为 `stage3-logs`，且节点处于就绪状态。若
 Minikube 重建外层容器，应重新核验 4 CPU 和 6 GiB 内存限制。
 
+## 工程检查
+
+```bash
+make fmt-check
+make vet
+make test
+make build
+make check
+```
+
+`make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，且不会
+修改工作区。需要主动格式化代码时执行 `make fmt`。
+
 ## 开发流程
 
 - 长期分支：`main`、`develop`。
@@ -71,6 +104,7 @@ Minikube 重建外层容器，应重新核验 4 CPU 和 6 GiB 内存限制。
 
 ## 当前状态
 
-环境、容量门禁、需求、架构、ADR 和 Go 模块基线已经完成。
-`feature/bootstrap` 已推送到远端。应用代码、Makefile 目标、持续集成和部署
-清单尚未创建。
+环境、容量门禁、需求、架构、ADR 和 Go 模块基线已经完成。`log-producer`
+已经实现配置加载、确定性 JSON 输出和可测试入口，并通过单元测试、静态检查、
+构建与本地运行冒烟。最小持续集成工作流已配置为执行 `make check`，托管
+运行待首次推送后验证；容器镜像和 Kubernetes 部署清单尚未创建。

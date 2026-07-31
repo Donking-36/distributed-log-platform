@@ -11,7 +11,7 @@
 
 ## 2. `v0.1.0` 范围
 
-- `demo-app` 输出可预测、可编号的结构化 JSON 日志。
+- `log-producer` 输出可预测、可编号的结构化 JSON 日志。
 - Filebeat 以 DaemonSet 运行，仅采集目标命名空间/工作负载，并补充 Kubernetes 元数据。
 - Kafka 使用单节点开发配置，按 `logs.<service>` 主题解耦采集和处理。
 - Go `log-processor` 消费 Kafka，校验和规范化事件，生成稳定 `event_id`，幂等写入 Elasticsearch。
@@ -26,22 +26,28 @@
 
 **前提**
 
-- `stage3-logs` 命名空间中用同一 `demo-app` 镜像部署 `demo-api` 和 `demo-worker`，并设置受控的 Pod `service` 标签。
+- `stage3-logs` 命名空间中用同一 `log-producer` 镜像部署 `api-service` 和 `worker-service`，并设置受控的 Pod `service` 标签；
+  Deployment 通过 Downward API 将该标签注入 `PRODUCER_SERVICE_NAME`。
 - 两个服务使用同一个唯一 `test_run_id`，各输出 20 条带可预测序号的事件。
 - Filebeat DaemonSet 已限定采集目标，排除自身及基础设施日志。
 
 **当**
 
-- `demo-app` 向 stdout 输出一批结构化 JSON 日志。
+- `log-producer` 向标准输出写入一批结构化 JSON 日志。
 
 **则**
 
 - Filebeat 从 Kubernetes 节点容器日志目录采集事件。
 - 每条事件包含命名空间、Pod 名称/UID、容器标识和服务名等必要元数据。
-- Filebeat 根据受控的 Pod `service` 标签选择主题，规范化后的事件字段使用 `service.name`。
-- `demo-api` 和 `demo-worker` 分别路由到 `logs.demo-api` 和 `logs.demo-worker`，两个服务不串流。
+- 受控的 Pod `service` 标签是服务身份与路由的权威来源；Filebeat 据此选择
+  主题，`log-processor` 校验它与原始 `service.name` 一致后，将该标签规范化
+  为最终 `service.name`。
+- `api-service` 和 `worker-service` 分别路由到 `logs.api-service` 和 `logs.worker-service`，两个服务不串流。
 - 两个主题中均能观察到 20 个预期唯一序号；原始 Kafka 物理消息允许因至少一次投递而重复。
-- 未知或缺失服务标签不能生成任意主题，必须进入固定后备路径或被拒绝并计数。
+- 未知或缺失服务标签不能生成任意主题，只能进入 `logs.unclassified`，且不由
+  正常处理器消费。
+- 已知标签与原始 `service.name` 不一致的事件由 `log-processor` 视为永久无效
+  事件并写入 `logs.dlq`。
 - 非目标工作负载及 Filebeat 自身日志不会进入这些业务主题。
 
 ### 3.2 UC-001B：Kafka 日志幂等写入 Elasticsearch
@@ -61,13 +67,13 @@
 - `event_id` 由稳定字段按固定顺序和分隔规则计算。
 - Elasticsearch 文档 `_id` 使用 `event_id`；重复投递不会增加唯一文档数。
 - Elasticsearch 写入成功后才确认 Kafka 消息。
-- 可重试错误使用有上限的退避；毒消息进入 `logs.dlq` 或 ADR 选定的等价路径，并以测试证明不会永久阻塞分区。
+- 可重试错误使用有上限的退避；毒消息进入 `logs.dlq`，并以测试证明不会永久阻塞分区。
 - `log-processor` 提供 `/healthz`、`/readyz`，以非根用户运行，并支持优雅终止。
 
 ### 3.3 UC-001 验收
 
 - Filebeat 确实以 DaemonSet 运行并采集 Pod 日志目录。
-- 临时 Kafka 消费者能展示 `demo-api`、`demo-worker` 的真实原始消息；不以 Filebeat 自身日志代替链路证据。
+- 临时 Kafka 消费者能展示 `api-service`、`worker-service` 的真实原始消息；不以 Filebeat 自身日志代替链路证据。
 - 两个受控服务正确路由到各自的主题，20 个预期唯一序号均可观察到。
 - Kafka 事件包含验收所需的 Kubernetes 元数据。
 - 在同一 `test_run_id`、声明的缓冲容量和故障窗口内，N 个逻辑唯一输入对应 N 个 Elasticsearch 唯一文档。
@@ -107,10 +113,11 @@
 |---|---|
 | `@timestamp` | 事件发生时间，UTC |
 | `event_id` | 稳定字段计算得到的确定性 SHA-256 标识 |
+| `event.sequence` | 本轮验收事件在批次内从 1 开始的连续序号 |
 | `message` | 可全文检索的日志正文 |
 | `log.level` | 规范化日志级别 |
-| `service.name` | 服务路由和查询维度 |
-| `test_run_id` | 冒烟/性能测试批次标识；生产事件允许为空 |
+| `service.name` | 由受控 Pod `service` 标签规范化得到的服务路由和查询维度 |
+| `test_run_id` | 同一验收批次跨服务共享的标识；生产事件允许为空 |
 | `kubernetes.namespace` | 目标命名空间 |
 | `kubernetes.pod.name` | Pod 名称 |
 | `kubernetes.pod.uid` | Pod 稳定身份的一部分 |
@@ -118,6 +125,12 @@
 | `log.file.path` | 采集来源 |
 | `log.offset` | 源日志位置，用于稳定标识 |
 | `ingested_at` | 平台写入时间，UTC |
+
+字段责任边界：
+
+- `log-producer` 产生事件时间、序号、级别、正文、原始服务名和测试批次。
+- Filebeat 补充 Kubernetes、容器、文件路径和偏移元数据，并按权威标签路由。
+- `log-processor` 校验服务身份，规范化最终字段，生成 `event_id` 和 `ingested_at`。
 
 ## 6. 非功能要求与量化口径
 
@@ -141,7 +154,7 @@ Filebeat 和 Kafka 消费链路采用至少一次投递；幂等由稳定 `event
 - 与 Grafana 重复的 Go 查询接口。
 - 为未来假设提前引入微服务框架、依赖注入框架或复杂领域分层。
 
-UC-003、Prometheus、HPA、多分区和扩展性能加固只在 UC-001/UC-002 核心验收全绿后进入。
+UC-003、Prometheus、HPA、消费者副本扩缩容实验和扩展性能加固只在 UC-001/UC-002 核心验收全绿后进入。
 
 ## 8. `v0.1.0` 完成条件
 
