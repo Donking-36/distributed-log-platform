@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-service
+  labels:
+    app.kubernetes.io/name: log-producer
+    app.kubernetes.io/instance: worker-service
+    app.kubernetes.io/component: log-source
+    app.kubernetes.io/part-of: distributed-log-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  progressDeadlineSeconds: 60
+  minReadySeconds: 5
+  # 避免更新期间两个同服务 Pod 同时从序号 1 开始输出。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: log-producer
+      app.kubernetes.io/instance: worker-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: log-producer
+        app.kubernetes.io/instance: worker-service
+        app.kubernetes.io/component: log-source
+        app.kubernetes.io/part-of: distributed-log-platform
+        # service 是日志身份和后续 Filebeat 路由的权威来源。
+        service: worker-service
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: log-producer
+          image: distributed-log-platform/log-producer:d20fc7f
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: log-producer-runtime
+          env:
+            # Downward API 保证进程配置与受控 Pod 标签一致。
+            - name: PRODUCER_SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.labels['service']
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

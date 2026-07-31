@@ -12,7 +12,10 @@
 ## 2. `v0.1.0` 范围
 
 - `log-producer` 输出可预测、可编号的结构化 JSON 日志。
-- Filebeat 以 DaemonSet 运行，仅采集目标命名空间/工作负载，并补充 Kubernetes 元数据。
+- 应用工作负载放在 Restricted 的 `stage3-logs`；Filebeat 以 DaemonSet 运行在
+  项目专用 `stage3-collector`，仅采集目标命名空间/工作负载并补充 Kubernetes
+  元数据。采集器因节点日志 `hostPath` 不能通过 Restricted enforce，其命名
+  空间只放采集组件并保留 Restricted warn/audit。
 - Kafka 使用单节点开发配置，按 `logs.<service>` 主题解耦采集和处理。
 - Go `log-processor` 消费 Kafka，校验和规范化事件，生成稳定 `event_id`，幂等写入 Elasticsearch。
 - Elasticsearch 保存可全文检索、可按时间、服务和日志级别聚合的事件。

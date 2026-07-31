@@ -85,7 +85,11 @@ UC-001/UC-002 验收链路全绿之后。
 
 - Minikube 配置实例：`stage3-logs`，Docker 驱动，containerd 运行时。
 - 已验证的外层限制：4 CPU、6 GiB 内存。
-- 命名空间：`stage3-logs`。
+- 应用命名空间：`stage3-logs`，使用 Pod Security Restricted enforce。
+- 采集命名空间：后续引入 `stage3-collector`，只放 Filebeat 等节点采集组件。
+  Filebeat 所需 `hostPath` 不被 Baseline/Restricted enforce 允许，因此该命名
+  空间使用 Privileged enforce，同时保留 Restricted warn/audit；不降低
+  `stage3-logs` 的准入级别。
 - 配置方式：Kustomize 基础配置加本地叠加配置（`base` + `overlay`）；
   不使用 Helm。
 - 服务：基础设施默认使用 `ClusterIP`；本地界面访问使用临时
@@ -98,14 +102,17 @@ UC-001/UC-002 验收链路全绿之后。
   或流量入口，进程退出已由 kubelet 感知，因此不添加固定成功、`kill -0 1`
   或检查进程文件等无实际健康语义的探针；端到端日志到达由链路冒烟验证。
 - 第三方镜像：只有在验证所选镜像行为后才收紧安全上下文；例外情况必须记录。
-- Filebeat 只挂载必要的宿主机日志路径和 `registry` 路径，使用目标工作负载
-  允许列表，并排除自身及基础设施日志。
+- Filebeat 只在 `stage3-collector` 挂载必要的宿主机日志路径和 `registry`
+  路径，使用 `stage3-logs` 目标工作负载允许列表，并排除自身及基础设施日志。
 - Filebeat 可能需要 `hostPath` 访问和集群级只读元数据权限；这些权限不允许
   修改项目命名空间之外的资源。
 
-完整技术栈必须在外层 4 CPU、6 GiB 限制内保留余量。Kafka 和
-Elasticsearch 使用小型开发堆内存、单副本和短保留期。具体资源请求、限制和
-堆内存值只有通过组件冒烟测试后才能采纳，本基线不凭猜测填写。
+完整技术栈必须在外层 4 CPU、6 GiB 限制内保留余量。`log-producer` 本地
+开发基线已通过部署冒烟：每个 Pod 请求 10m CPU/16 MiB 内存，上限为
+100m CPU/64 MiB 内存；一次稳定运行快照中 cgroup `memory.current` 约为
+7.8 MB，两个 Pod 均无重启。该值只用于当前本地集群，不代表生产容量。
+Kafka 和 Elasticsearch 使用小型开发堆内存、单副本和短保留期；它们的具体
+资源和堆内存值只有通过对应组件冒烟测试后才能采纳。
 
 ## 5. 主题、索引与查询路径
 

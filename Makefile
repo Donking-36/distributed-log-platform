@@ -3,13 +3,17 @@
 GO ?= go
 GOFMT ?= gofmt
 DOCKER ?= docker
+KUBECTL ?= kubectl
 GO_VERSION := 1.26.5
 EXPECTED_GO_VERSION := go$(GO_VERSION)
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*')
 IMAGE_REPOSITORY ?= distributed-log-platform/log-producer
 IMAGE_TAG ?= dev
+KUBE_CONTEXT ?= stage3-logs
+KUBE_NAMESPACE ?= stage3-logs
+KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
 
-.PHONY: check version-check fmt fmt-check vet test build image
+.PHONY: check version-check fmt fmt-check vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
 check: version-check fmt-check vet test build
@@ -72,3 +76,43 @@ image:
 		--target log-producer \
 		--tag $(IMAGE_REPOSITORY):$(IMAGE_TAG) \
 		.
+
+# k8s-context-check 在任何集群写操作前确认当前上下文，防止误操作其他集群。
+k8s-context-check:
+	@actual="$$($(KUBECTL) config current-context)"; \
+	status=$$?; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "读取 Kubernetes 当前上下文失败"; \
+		exit "$$status"; \
+	fi; \
+	if [ "$$actual" != "$(KUBE_CONTEXT)" ]; then \
+		echo "Kubernetes 上下文不匹配：实际 $$actual，要求 $(KUBE_CONTEXT)"; \
+		exit 1; \
+	fi
+
+# k8s-render 只渲染最终清单，不连接或修改集群。
+k8s-render:
+	@$(KUBECTL) kustomize $(KUSTOMIZE_OVERLAY)
+
+# k8s-validate 使用目标 API Server 校验最终清单，但不持久化资源。
+k8s-validate: k8s-context-check
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		--dry-run=server \
+		-k $(KUSTOMIZE_OVERLAY)
+
+# k8s-deploy 在服务端 dry-run 通过后，才向明确的项目上下文应用本地 overlay。
+k8s-deploy: k8s-validate
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		-k $(KUSTOMIZE_OVERLAY)
+
+k8s-status:
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		get deployments,pods \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=log-producer \
+		-o wide
