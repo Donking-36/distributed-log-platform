@@ -21,8 +21,9 @@ type logEvent struct {
 // waitFunc 抽象两条事件之间的等待边界，使发送节奏无需依赖真实睡眠即可测试。
 type waitFunc func(context.Context, time.Duration) error
 
-// writeEvents 按顺序生成指定数量的日志事件并逐行写入 output。
-// 第一条事件立即写出，后续事件只在可取消的固定间隔后写出。
+// writeEvents 按顺序生成日志事件并逐行写入 output。
+// Count 为正数时写出固定批次，为零时持续到上下文取消；第一条事件立即写出，
+// 后续事件只在可取消的固定间隔后写出。
 func writeEvents(
 	ctx context.Context,
 	output io.Writer,
@@ -32,7 +33,7 @@ func writeEvents(
 ) error {
 	encoder := json.NewEncoder(output)
 
-	for sequence := 1; sequence <= cfg.Count; sequence++ {
+	for sequence := 1; ; sequence++ {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("before event %d: %w", sequence, err)
 		}
@@ -56,8 +57,8 @@ func writeEvents(
 			)
 		}
 
-		if sequence == cfg.Count {
-			continue
+		if cfg.Count > 0 && sequence == cfg.Count {
+			return nil
 		}
 		if err := wait(ctx, cfg.Interval); err != nil {
 			return fmt.Errorf(
@@ -67,8 +68,6 @@ func writeEvents(
 			)
 		}
 	}
-
-	return nil
 }
 
 // waitForInterval 使用独立计时器等待下一条事件，并同时监听进程取消信号。

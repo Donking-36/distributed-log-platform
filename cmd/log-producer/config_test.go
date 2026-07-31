@@ -64,6 +64,23 @@ func TestLoadConfigUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAllowsZeroCountForContinuousMode(t *testing.T) {
+	values := map[string]string{
+		"PRODUCER_SERVICE_NAME": "api-service",
+		"PRODUCER_TEST_RUN_ID":  "run-001",
+		"PRODUCER_COUNT":        "0",
+	}
+
+	cfg, err := loadConfig(lookupEnvFrom(values))
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+
+	if cfg.Count != 0 {
+		t.Errorf("Count = %d, want 0", cfg.Count)
+	}
+}
+
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -94,22 +111,13 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			wantMessage: "PRODUCER_COUNT must be a valid integer",
 		},
 		{
-			name: "zero count",
-			values: map[string]string{
-				"PRODUCER_SERVICE_NAME": "api-service",
-				"PRODUCER_TEST_RUN_ID":  "run-001",
-				"PRODUCER_COUNT":        "0",
-			},
-			wantMessage: "PRODUCER_COUNT must be greater than zero",
-		},
-		{
 			name: "negative count",
 			values: map[string]string{
 				"PRODUCER_SERVICE_NAME": "api-service",
 				"PRODUCER_TEST_RUN_ID":  "run-001",
 				"PRODUCER_COUNT":        "-1",
 			},
-			wantMessage: "PRODUCER_COUNT must be greater than zero",
+			wantMessage: "PRODUCER_COUNT must not be negative",
 		},
 		{
 			name: "empty interval",

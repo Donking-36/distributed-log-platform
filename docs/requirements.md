@@ -27,13 +27,16 @@
 **前提**
 
 - `stage3-logs` 命名空间中用同一 `log-producer` 镜像部署 `api-service` 和 `worker-service`，并设置受控的 Pod `service` 标签；
-  Deployment 通过 Downward API 将该标签注入 `PRODUCER_SERVICE_NAME`。
-- 两个服务使用同一个唯一 `test_run_id`，各输出 20 条带可预测序号的事件。
+  Deployment 通过 Downward API 将该标签注入 `PRODUCER_SERVICE_NAME`，并以
+  `PRODUCER_COUNT=0` 持续运行。
+- 固定数量验收使用同一镜像创建两个一次性 Job，分别携带 `api-service` 和
+  `worker-service` 权威标签；两个 Job 使用同一个唯一 `test_run_id`，各输出
+  20 条带可预测序号的事件。
 - Filebeat DaemonSet 已限定采集目标，排除自身及基础设施日志。
 
 **当**
 
-- `log-producer` 向标准输出写入一批结构化 JSON 日志。
+- 持续 Deployment 和固定批次验收 Job 向标准输出写入结构化 JSON 日志。
 
 **则**
 

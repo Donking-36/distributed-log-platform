@@ -95,9 +95,9 @@ func (c config) validate() error {
 			producerTestRunIDEnv,
 		)
 	}
-	if c.Count <= 0 {
+	if c.Count < 0 {
 		return fmt.Errorf(
-			"%s must be greater than zero",
+			"%s must not be negative",
 			producerCountEnv,
 		)
 	}

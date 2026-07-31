@@ -27,9 +27,6 @@ func main() {
 		time.Now,
 		waitForInterval,
 	)
-	if errors.Is(err, context.Canceled) {
-		return
-	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "log-producer: %v\n", err)
 		os.Exit(1)
@@ -63,6 +60,11 @@ func execute(
 	}
 
 	if err := writeEvents(ctx, output, cfg, now, wait); err != nil {
+		// 持续模式以信号取消作为正常生命周期终点；有限批次必须保留取消错误，
+		// 避免 Kubernetes Job 在未写完目标事件时被误判为成功。
+		if cfg.Count == 0 && errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return fmt.Errorf("write events: %w", err)
 	}
 

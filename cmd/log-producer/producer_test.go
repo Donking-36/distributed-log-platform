@@ -183,6 +183,56 @@ func TestWriteEventsStopsWhenWaitIsCanceled(t *testing.T) {
 	}
 }
 
+func TestWriteEventsRunsContinuouslyUntilCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var output bytes.Buffer
+	waitCalls := 0
+
+	err := writeEvents(
+		ctx,
+		&output,
+		config{
+			ServiceName: "api-service",
+			TestRunID:   "run-001",
+			Count:       0,
+			Interval:    time.Second,
+		},
+		time.Now,
+		func(ctx context.Context, _ time.Duration) error {
+			waitCalls++
+			if waitCalls == 3 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("writeEvents() error = %v, want context canceled", err)
+	}
+	if waitCalls != 3 {
+		t.Fatalf("wait calls = %d, want 3", waitCalls)
+	}
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3", len(lines))
+	}
+	for index, line := range lines {
+		var event logEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode line %d: %v", index+1, err)
+		}
+		if event.Sequence != index+1 {
+			t.Errorf(
+				"event sequence = %d, want %d",
+				event.Sequence,
+				index+1,
+			)
+		}
+	}
+}
+
 func TestWriteEventsHonorsCanceledContextBeforeFirstEvent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
