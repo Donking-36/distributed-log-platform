@@ -40,7 +40,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: log-producer
-          image: distributed-log-platform/log-producer:d20fc7f
+          image: distributed-log-platform/log-producer:unconfigured
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:

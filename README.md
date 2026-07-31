@@ -91,10 +91,12 @@ docker run --rm \
 
 ## Kubernetes 本地部署
 
-`deploy/kubernetes/base/log-producer` 保存两个持续运行的 Deployment 和共享
-运行配置；`deploy/kubernetes/overlays/local` 创建 `stage3-logs` 命名空间，
-并把旁加载镜像的拉取策略收紧为 `Never`。两个 Deployment 复用同一镜像，
-通过各自 Pod 的 `service` 标签和 Downward API 获得不同业务身份。
+`deploy/kubernetes/base/log-producer` 保存两个持续运行的 Deployment 和共享运行
+配置；`deploy/kubernetes/base/log-producer-acceptance` 单独保存两个固定批次
+Job。两种形态通过共享 Kustomize Component 固定同一镜像，但不会在一次部署中
+相互启动。`deploy/kubernetes/overlays/local` 创建 `stage3-logs` 命名空间，
+并把持续工作负载的拉取策略收紧为 `Never`；验收 Job 使用独立的
+`deploy/kubernetes/overlays/local-acceptance`。
 
 本地 overlay 固定使用已经验证的应用代码提交 `d20fc7f`。首次部署前，先确认
 本地 Docker 中存在该标签并将其旁加载到 Minikube：
@@ -129,13 +131,36 @@ kubectl --context=stage3-logs logs \
   --tail=5
 ```
 
-当前持续 Deployment 不承担“每服务精确 20 条”的验收；固定数量验收将使用
-同一镜像的两个一次性 Job，避免有限进程被 Deployment 反复重启。
+持续 Deployment 不承担“每服务精确 20 条”的验收；执行下列独立入口：
+
+```bash
+make k8s-acceptance-render
+make k8s-acceptance
+```
+
+`k8s-acceptance` 默认生成形如 `uc001a-<UUID>` 的唯一 `test_run_id`，也可通过
+`ACCEPTANCE_RUN_ID=<新值>` 显式指定。脚本先核对清单只能包含目标命名空间中的
+两个预期 Job，再用临时名称完成服务端 dry-run；它拒绝删除仍在运行的同名 Job，
+只精确替换两个已终止 Job。两个 Job 均使用 `PRODUCER_COUNT=20`、
+`backoffLimit=0` 和 `restartPolicy=Never`。
+
+验收入口会确认以下条件，其中 Python 标准库校验器负责逐行 JSON 契约：
+
+- Job 成功且容器没有重启；
+- 输出恰好 20 行合法 JSON；
+- `service.name` 与权威 Pod `service` 标签对应；
+- 两个服务共享本次 `test_run_id`；
+- `event.sequence` 严格为 `1..20`，消息和级别符合日志源契约。
+
+成功的 Job 会保留为现场证据，下一次执行时才精确替换。失败的 Job 同样保留
+供 `kubectl describe` 和 `kubectl logs` 排查；该入口不修改持续 Deployment，
+也不属于默认 `make check`。
 
 ## 项目文档
 
 - [`docs/requirements.md`](docs/requirements.md)：UC-001/UC-002 的范围、日志契约和验收要求。
 - [`docs/architecture.md`](docs/architecture.md)：组件职责、部署拓扑和兼容性门禁。
+- [`docs/test-report.md`](docs/test-report.md)：已完成切片的真实命令、结果与边界。
 - [`docs/adr/`](docs/adr/)：核心链路、投递语义和幂等策略等架构决策。
 
 ## 本地开发前检查
@@ -180,5 +205,6 @@ make k8s-status
 环境、容量门禁、需求、架构、ADR 和 Go 模块基线已经完成。`log-producer`
 已经实现固定批次与持续模式、确定性 JSON 输出、固定发送间隔和可取消等待，
 并通过单元测试、静态检查、构建、本地运行和容器冒烟。两个非 root
-`log-producer` Deployment 已通过 Kustomize 部署到 `stage3-logs`，Downward
-API 身份、安全上下文、资源限制和真实日志均已验证；Kafka 与 Filebeat 尚未部署。
+`log-producer` Deployment 已通过 Kustomize 部署到 `stage3-logs`；两个独立
+验收 Job 已验证各输出 20 条连续 JSON。Downward API 身份、安全上下文、资源
+限制和真实日志均已验证；Kafka 与 Filebeat 尚未部署。

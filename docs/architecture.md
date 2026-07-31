@@ -63,7 +63,15 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 使用持续模式，避免正常退出后被 `restartPolicy: Always` 反复拉起并重置序号；
 精确 20 条的 UC-001A 验收使用一次性 Job。两种形态复用同一镜像和事件契约，
 不在容器入口外包裹 `sleep`。持续模式收到取消信号后以退出码 0 结束；有限
-批次若在完成前被取消则返回非零退出码，使 Job 能识别失败并按策略重试。
+批次若在完成前被取消则返回非零退出码，使 Job 能识别失败；当前验收策略不自动
+重试。
+
+验收 Job 使用独立 Kustomize overlay，不随持续 Deployment 部署。两个 Job
+固定为单并发、单完成数、`backoffLimit=0` 和 `restartPolicy=Never`，避免失败
+重试产生额外批次。运行入口为两个 Job 注入同一个当次唯一 `test_run_id`，依次
+完成客户端资源集合校验、临时名称服务端 dry-run、旧终态 Job 的精确替换、
+固定名称创建、等待和逐行 JSON 验证；正在运行的同名 Job 不会被替换。成功和
+失败 Job 均保留到下一次执行，用于现场取证。
 
 ### 3.1 Go 可执行程序内部组织
 
