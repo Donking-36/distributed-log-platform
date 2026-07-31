@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - api-service-deployment.yaml
+  - worker-service-deployment.yaml
+
+# 最终镜像标签只在一处维护，避免两个 Deployment 漂移。
+images:
+  - name: distributed-log-platform/log-producer
+    newTag: d20fc7f
+
+configMapGenerator:
+  - name: log-producer-runtime
+    literals:
+      # Deployment 使用持续模式；固定 20 条验收由后续一次性 Job 承担。
+      - PRODUCER_COUNT=0
+      - PRODUCER_INTERVAL=1s
+      - PRODUCER_TEST_RUN_ID=day2-continuous-v1
+
+generatorOptions:
+  labels:
+    app.kubernetes.io/name: log-producer
+    app.kubernetes.io/component: log-source
+    app.kubernetes.io/part-of: distributed-log-platform
+  disableNameSuffixHash: false

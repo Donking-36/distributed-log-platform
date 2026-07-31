@@ -89,6 +89,49 @@ docker run --rm \
 `make image` 是显式的镜像构建入口，不属于默认 `make check`。基础持续集成只
 运行无需 Docker 的快速门禁；容器构建和运行验收在相关功能分支中单独执行。
 
+## Kubernetes 本地部署
+
+`deploy/kubernetes/base/log-producer` 保存两个持续运行的 Deployment 和共享
+运行配置；`deploy/kubernetes/overlays/local` 创建 `stage3-logs` 命名空间，
+并把旁加载镜像的拉取策略收紧为 `Never`。两个 Deployment 复用同一镜像，
+通过各自 Pod 的 `service` 标签和 Downward API 获得不同业务身份。
+
+本地 overlay 固定使用已经验证的应用代码提交 `d20fc7f`。首次部署前，先确认
+本地 Docker 中存在该标签并将其旁加载到 Minikube：
+
+```bash
+docker image inspect distributed-log-platform/log-producer:d20fc7f
+minikube image load \
+  -p stage3-logs \
+  distributed-log-platform/log-producer:d20fc7f
+
+make k8s-render
+make k8s-validate
+make k8s-deploy
+make k8s-status
+```
+
+如果本地不存在该镜像，应从 Git 提交 `d20fc7f` 构建，不能把其他工作区内容
+冒充为这个标签。`k8s-render` 只输出最终 YAML；`k8s-validate` 使用 API Server
+做服务端 dry-run；`k8s-deploy` 在确认当前上下文为 `stage3-logs` 后才应用。
+
+查看两个真实日志源：
+
+```bash
+kubectl --context=stage3-logs logs \
+  -n stage3-logs \
+  -l app.kubernetes.io/instance=api-service \
+  --tail=5
+
+kubectl --context=stage3-logs logs \
+  -n stage3-logs \
+  -l app.kubernetes.io/instance=worker-service \
+  --tail=5
+```
+
+当前持续 Deployment 不承担“每服务精确 20 条”的验收；固定数量验收将使用
+同一镜像的两个一次性 Job，避免有限进程被 Deployment 反复重启。
+
 ## 项目文档
 
 - [`docs/requirements.md`](docs/requirements.md)：UC-001/UC-002 的范围、日志契约和验收要求。
@@ -117,6 +160,9 @@ make test
 make build
 make check
 make image IMAGE_TAG="$(git rev-parse --short HEAD)"
+make k8s-render
+make k8s-validate
+make k8s-status
 ```
 
 `make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，且不会
@@ -132,6 +178,7 @@ make image IMAGE_TAG="$(git rev-parse --short HEAD)"
 ## 当前状态
 
 环境、容量门禁、需求、架构、ADR 和 Go 模块基线已经完成。`log-producer`
-已经实现配置加载、确定性 JSON 输出、固定发送间隔和可取消等待，并通过
-单元测试、静态检查、构建、本地运行和容器冒烟。多阶段非 root 镜像、最小
-持续集成工作流和首个受保护 PR 均已验证；Kubernetes 部署清单尚未创建。
+已经实现固定批次与持续模式、确定性 JSON 输出、固定发送间隔和可取消等待，
+并通过单元测试、静态检查、构建、本地运行和容器冒烟。两个非 root
+`log-producer` Deployment 已通过 Kustomize 部署到 `stage3-logs`，Downward
+API 身份、安全上下文、资源限制和真实日志均已验证；Kafka 与 Filebeat 尚未部署。
