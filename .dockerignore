@@ -1,0 +1,17 @@
+.git
+.github
+.gitignore
+
+AGENTS.md
+README.md
+docs/
+
+bin/
+coverage.out
+coverage.html
+
+*.log
+*.tmp
+
+.env
+.env.*

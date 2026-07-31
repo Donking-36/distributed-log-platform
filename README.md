@@ -64,6 +64,31 @@ PRODUCER_INTERVAL=10ms \
 go run ./cmd/log-producer
 ```
 
+## 容器镜像
+
+根目录 Dockerfile 使用 Go 1.26.5 多阶段构建，只把静态二进制复制到固定摘要的
+Alpine 3.23 运行镜像。容器以 UID/GID 10001 运行，并显式使用 SIGTERM 作为
+停止信号。
+
+`make image` 只接受默认的开发标签 `dev`，或干净工作区的当前提交短 SHA；
+因此不会生成 `latest` 或来源不明的任意标签。同一提交标签一旦用于部署或验收，
+按流程约定不再覆盖：
+
+```bash
+IMAGE_TAG="$(git rev-parse --short HEAD)"
+make image IMAGE_TAG="$IMAGE_TAG"
+
+docker run --rm \
+  -e PRODUCER_SERVICE_NAME=api-service \
+  -e PRODUCER_TEST_RUN_ID=container-local-001 \
+  -e PRODUCER_COUNT=2 \
+  -e PRODUCER_INTERVAL=10ms \
+  "distributed-log-platform/log-producer:$IMAGE_TAG"
+```
+
+`make image` 是显式的镜像构建入口，不属于默认 `make check`。基础持续集成只
+运行无需 Docker 的快速门禁；容器构建和运行验收在相关功能分支中单独执行。
+
 ## 项目文档
 
 - [`docs/requirements.md`](docs/requirements.md)：UC-001/UC-002 的范围、日志契约和验收要求。
@@ -91,6 +116,7 @@ make vet
 make test
 make build
 make check
+make image IMAGE_TAG="$(git rev-parse --short HEAD)"
 ```
 
 `make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，且不会
@@ -107,5 +133,5 @@ make check
 
 环境、容量门禁、需求、架构、ADR 和 Go 模块基线已经完成。`log-producer`
 已经实现配置加载、确定性 JSON 输出、固定发送间隔和可取消等待，并通过
-单元测试、静态检查、构建与本地运行冒烟。最小持续集成工作流和首个受保护
-PR 均已验证；容器镜像和 Kubernetes 部署清单尚未创建。
+单元测试、静态检查、构建、本地运行和容器冒烟。多阶段非 root 镜像、最小
+持续集成工作流和首个受保护 PR 均已验证；Kubernetes 部署清单尚未创建。
