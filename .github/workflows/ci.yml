@@ -1,0 +1,30 @@
+name: 持续集成
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 工程检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 配置 Go 1.26.5
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+
+      - name: 执行统一工程门禁
+        run: make check
