@@ -104,12 +104,23 @@ UC-001/UC-002 验收链路全绿之后。
   `kubectl port-forward`。
 - 有状态组件：Kafka 和 Elasticsearch 都使用单副本和开发级存储。
   这不是生产级高可用拓扑。
+- Kafka 使用独立 `local-kafka` overlay 管理有状态生命周期，不随应用 Deployment
+  隐式更新。普通 `kafka` Service 是客户端 bootstrap 入口；
+  `kafka-headless` 为 `kafka-0` 提供稳定 Broker/Controller DNS，并发布未就绪
+  地址以避免单节点控制器启动前的解析死锁。
+- Kafka StatefulSet 使用固定 cluster ID、2 GiB `ReadWriteOnce` PVC 和 Retain
+  删除/缩容策略。自动建主题关闭，主题初始化不耦合进 Broker 入口。
 - `log-processor`：配置就绪/存活探针、资源请求/限制、优雅终止，并以非根
   用户运行。
 - `log-producer`：配置资源请求/限制、安全上下文和优雅终止。它没有 Service
   或流量入口，进程退出已由 kubelet 感知，因此不添加固定成功、`kill -0 1`
   或检查进程文件等无实际健康语义的探针；端到端日志到达由链路冒烟验证。
 - 第三方镜像：只有在验证所选镜像行为后才收紧安全上下文；例外情况必须记录。
+  Kafka 已验证以 UID/GID 1000、Restricted、只读根文件系统运行；官方入口所需
+  `/opt/kafka/config`、`/tmp` 和数据目录分别由显式可写卷提供。初始化容器先把
+  镜像原始配置复制到配置卷，避免格式化 JVM 启动时缺少 Log4j2 配置；主容器
+  随后生成最终配置。两者使用同一镜像身份，并关闭 Service 环境变量自动注入，
+  避免 `KAFKA_*` 名称污染 Broker 配置。
 - Filebeat 只在 `stage3-collector` 挂载必要的宿主机日志路径和 `registry`
   路径，使用 `stage3-logs` 目标工作负载允许列表，并排除自身及基础设施日志。
 - Filebeat 可能需要 `hostPath` 访问和集群级只读元数据权限；这些权限不允许
@@ -120,9 +131,14 @@ UC-001/UC-002 验收链路全绿之后。
 100m CPU/64 MiB 内存；一次稳定运行快照中 cgroup `memory.current` 约为
 7.8 MB，两个 Pod 均无重启。该值只用于当前本地集群，不代表生产容量。
 Kafka 和 Elasticsearch 使用小型开发堆内存、单副本和短保留期。Kafka 4.3.1
-已在宿主 Docker 中通过 1 CPU、1.5 GiB 容器上限的兼容性冒烟，稳定时一次资源
-快照约为 544 MiB；该结果只证明当前镜像可以在此资源包络中启动并完成基础
-生产/消费，不直接等同于 Kubernetes 的最终堆内存、存储和保留期配置。
+在 Kubernetes 中请求 250m CPU/768 MiB，限制为 1 CPU/1536 MiB，JVM 堆固定
+512 MiB；一次稳定快照为 `memory.current=524591104` 字节、PID 119。实际 cgroup
+为 1 CPU 和 1536 MiB，2 GiB PVC 已 Bound。该值是本地开发基线而非峰值、容量
+结论或生产配置。
+
+Kafka 的 startup/readiness 探针执行 Broker API 命令；liveness 使用 TCP 9092，
+避免每 20 秒额外启动 JVM。TCP 只能证明端口仍监听，不能证明 Broker API 一定
+有响应；该权衡只作为本地单节点基线，生产设计需使用更完整的健康信号。
 
 ## 5. 主题、索引与查询路径
 
@@ -135,9 +151,10 @@ Kafka 和 Elasticsearch 使用小型开发堆内存、单副本和短保留期�
 | `logs.unclassified` | 1 | 1 | 未知或缺失服务标签的固定兜底主题 |
 | `logs.dlq` | 1 | 1 | 永久无效事件和处理证据 |
 
-已知服务使用稳定的 Pod UID 作为分区键。未知标签不能创建任意主题名。初始
-保留期较短且仅用于本地环境；Kafka 基础兼容性冒烟已经通过，具体保留时长仍
-需结合 Kubernetes 存储和恢复验证后写入清单。
+已知服务使用稳定的 Pod UID 作为分区键。未知标签不能创建任意主题名。当前
+Broker 的本地默认保留边界为 24 小时、每分区 128 MiB、单段 64 MiB；两种条件
+任一满足即可淘汰旧段。这些值只约束 2 GiB 开发 PVC，后续主题初始化必须确认
+主题继承值，不能外推为生产保留策略。
 
 这些主题数量和兜底路径已由 ADR-001/ADR-002 接受。业务主题从创建时起即为
 多分区；消费者副本扩缩容实验本身仍然延期。
@@ -192,7 +209,7 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | Minikube | 本地已验证：1.38.1 | `minikube version` / 配置实例证据 |
 | Kubernetes | 集群已验证：v1.35.1 | `stage3-logs` 节点为 Ready |
 | containerd | 集群已验证：2.2.1 | 节点运行时输出 |
-| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；单节点 KRaft、主题、生产/消费和同键分区冒烟通过 |
+| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、运行时 imageID，以及同一 PVC 上的 KRaft 元数据连续性通过；主题和消息恢复尚未验证 |
 | Filebeat 镜像 | 待定 | 通过 Filebeat→Kafka 配置/输出检查，并保留必需的真实事件字段 |
 | Elasticsearch 镜像 | 待定 | 健康、模板、索引和查询冒烟测试通过后固定镜像标签和摘要 |
 | Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
@@ -209,6 +226,16 @@ combined KRaft 模式，镜像内为非 root `appuser` 和 OpenJDK 21.0.11。官
 [4.3 Docker 指南](https://kafka.apache.org/43/getting-started/docker/)和
 [KRaft 说明](https://kafka.apache.org/43/operations/kraft/)。combined 模式仅
 用于本地开发验证，不代表控制器隔离、故障容忍或生产高可用。
+
+本地 Docker→containerd 旁加载将 OCI manifest media type 转为 Docker v2，
+使节点内 manifest 摘要变为
+`sha256:f8f865a3222d807cf1e6c515ca447cb2fb604ddc57f0a007a02a9ce79bd7a511`。
+自动比较确认它与上游 amd64 manifest 的 config digest
+`sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11`
+及全部 12 个 layer 摘要和大小一致；local overlay 使用固定 `4.3.1` 标签、
+`Never` 拉取策略和四个摘要注解。注解仅保存证据；部署前门禁通过节点内
+`ctr`/`crictl` 强制比较 manifest/config 摘要，滚动完成后再要求主容器 imageID
+等于该 config digest。
 
 ## 9. 验证层次
 
@@ -227,9 +254,10 @@ combined KRaft 模式，镜像内为非 root `appuser` 和 OpenJDK 21.0.11。官
 
 ## 10. 延期决策
 
-- Kafka 的 Kubernetes 监听器、堆内存、存储和保留期；Filebeat、Elastic 和
-  Grafana 镜像的精确固定版本。
-- 精确的堆内存、资源请求、资源限制和数据保留值。
+- Kafka 的 TLS/SASL、多节点控制器隔离、生产容量与生产保留策略；Filebeat、
+  Elastic 和 Grafana 镜像的精确固定版本。
+- Filebeat、Elasticsearch、Grafana 和后续 Go 组件的精确堆内存、资源请求、
+  资源限制和数据保留值。
 - UC-003 告警、Prometheus、HPA 和多分区扩缩容实验。
 - 生产级可用性、安全性和跨集群采集。
 

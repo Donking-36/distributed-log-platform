@@ -75,7 +75,8 @@ Go 包语句覆盖率为 `91.0%`。反向用例确认校验器会拒绝 19 行�
 
 ### 未覆盖边界
 
-- 尚未部署 Kafka、Filebeat，也未验证主题路由或 Kubernetes 元数据补充。
+- 该次日志源验收当时尚未部署 Kafka、Filebeat；后续 Kafka 结果见下方独立章节。
+  主题路由和 Kubernetes 元数据补充仍未验证。
 - Job stdout 的“精确 20 行”不等同于后续 Kafka 至少一次投递的物理消息数量；
   Kafka 阶段必须按唯一序号和 `test_run_id` 单独验收。
 - 原始日志只用于本次校验，不提交仓库；报告保存可重复命令、摘要和校验和。
@@ -166,5 +167,113 @@ Broker 日志没有 ERROR/FATAL，`OOMKilled=false`。Docker 发送 SIGTERM 后�
 - Kafka 4.3.1 官方 JVM 镜像适用于本项目下一步的本地 Kubernetes 设计基线。
 - 当前只证明单节点 KRaft 和容器内 Admin/Producer/Consumer 闭环可用。
 - Filebeat 对 Kafka 4.3.1 的真实生产兼容性仍需在 Filebeat 版本选定后验证。
-- Kubernetes Service、advertised listener、持久存储、堆内存和保留期尚未验证。
+- 该次宿主 Docker 冒烟不覆盖 Kubernetes；后续结果见下一节。
 - combined KRaft 是开发形态，不代表生产级控制器隔离或高可用。
+
+## Kafka 4.3.1：Kubernetes 单节点基线
+
+- 日期：2026-08-03
+- Kubernetes：v1.35.1，containerd 2.2.1
+- 命名空间：`stage3-logs`，Pod Security Restricted enforce
+- 最终 StatefulSet revision：`kafka-6684fcbcb`
+
+### 拓扑与镜像证据
+
+Kafka 使用独立 `local-kafka` overlay。普通 `kafka` Service 提供 9092 客户端
+入口；`kafka-headless` 发布 9092/9093 和未就绪地址，为 `kafka-0` 提供稳定
+Broker/Controller DNS。StatefulSet 使用一个 combined KRaft 副本和 2 GiB
+`ReadWriteOnce` PVC，删除与缩容策略均为 Retain。
+
+base 固定官方多架构索引摘要，local overlay 使用已旁加载的 `apache/kafka:4.3.1`
+和 `imagePullPolicy: Never`。从 Docker daemon 导入 containerd 时，manifest
+media type 从 OCI 转为 Docker v2，本地 manifest 摘要因此变为：
+
+```text
+upstream-index=sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+upstream-amd64=sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26
+local-import=sha256:f8f865a3222d807cf1e6c515ca447cb2fb604ddc57f0a007a02a9ce79bd7a511
+config=sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11
+```
+
+PowerShell JSON 自动比较确认上游和本地 manifest 的 config digest、config 大小
+以及 12 个 layer 的摘要和大小全部相同。`make k8s-kafka-image-check` 还会在部署
+前读取节点 `ctr` 的标签目标 manifest 和 `crictl` 的 config 摘要；使用全零错误
+manifest 的反例按预期退出 1。rollout 后同时检查初始化容器和主容器 imageID；
+临时假 `kubectl` 返回“主容器正确、init 错误”时也按预期退出 1。最终两个
+imageID 都等于上述 config digest，且均为 0 次重启。
+
+### 生效配置与资源边界
+
+Broker 最终生效配置包括：
+
+```text
+advertised.listeners=PLAINTEXT://kafka-0.kafka-headless.stage3-logs.svc.cluster.local:9092
+controller.quorum.voters=1@kafka-0.kafka-headless.stage3-logs.svc.cluster.local:9093
+process.roles=broker,controller
+auto.create.topics.enable=false
+log.dirs=/var/lib/kafka/data
+log.retention.hours=24
+log.retention.bytes=134217728
+log.segment.bytes=67108864
+```
+
+内部 offsets、transaction 和 share coordinator 主题的默认创建配置为 3 个分区，
+复制因子和最小 ISR 均按单节点开发边界设为 1；本轮没有触发这些内部主题创建。
+工作负载请求 250m CPU/768 MiB，限制为 1 CPU/1536 MiB，JVM 堆为 512 MiB；
+容器内证据为：
+
+```text
+cpu.max=100000 100000
+memory.max=1610612736
+memory.current=524591104
+pids.current=119
+```
+
+镜像以 UID/GID 1000 运行，禁用 ServiceLinks 和 ServiceAccount token，使用
+RuntimeDefault seccomp、禁止提权并丢弃全部 capabilities。初始化容器和主容器
+均保持只读根文件系统；`/opt/kafka/config`、`/tmp` 和 `/var/lib/kafka/data`
+三个显式挂载点满足官方入口所需写路径。
+
+### 失败分支与恢复证据
+
+首版 Pod 已成功格式化 PVC，但官方脚本随后尝试创建
+`/opt/kafka/logs/kafkaServer-gc.log`，在只读根文件系统上进入 CrashLoop。没有
+通过关闭只读根文件系统绕过；修复将 `LOG_DIR` 指向 `/tmp/kafka-logs`，并用
+`KAFKA_GC_LOG_OPTS=-Xlog:gc:stdout:time,tags` 把 GC 事件交给容器 stdout。
+
+完整启动日志随后暴露一条 `Reconfiguration failed`：空 `emptyDir` 遮住了镜像
+自带的 `tools-log4j2.yaml`，而官方格式化 JVM 在生成最终配置前已经需要它。
+修复增加 `prepare-config` 初始化容器，把镜像原始配置复制到共享配置卷并断言
+`server.properties`、`log4j2.yaml`、`tools-log4j2.yaml` 非空。首次使用 `cp -a`
+虽然复制出文件，但因 Restricted 容器不能保留卷根属性而退出 1；改为只复制
+内容的 `cp -R` 后，初始化容器退出码 0、0 次重启，未放宽权限。
+
+旧的未就绪 StatefulSet revision 阻塞滚动修复。核对 Pod owner 为 StatefulSet
+`kafka`、PVC 为 `data-kafka-0` 后，只删除失败的 `kafka-0` Pod，PVC 未删除。
+新 Pod 按修复模板重建并 Ready。随后再次滚动更新收敛 GC 日志，验证结果为：
+
+```text
+PVC UID=6bc802f0-4c09-478c-bf7d-a61dcb25dd13
+PVC volume=pvc-6bc802f0-4c09-478c-bf7d-a61dcb25dd13
+final Pod UID=13e17f46-1d3a-4cde-aaa8-53a53053573d
+ClusterId=7KrkiFZsTlGTY-F1HBdr9Q
+LeaderId=1
+LeaderEpoch=3
+MaxFollowerLag=0
+```
+
+Pod 身份改变而 PVC、Cluster ID 和 voter 保持稳定，证明当前单节点元数据能在
+同卷 Pod 重建后恢复；本步没有证明主题或消息恢复。最终完整 1371 行启动日志中
+`ERROR`、`FATAL`、`Reconfiguration`、`Read-only` 和 `StatusConsoleListener`
+匹配数均为 0。
+
+### 门禁与未覆盖边界
+
+`make check`、三套 Kustomize 渲染、应用与 Kafka 服务端 dry-run、镜像身份门禁、
+`git diff --check` 均通过；持续应用 overlay 与 Kafka overlay 的 `kubectl diff`
+均为空。Broker API、Kafka 4.3.1 版本和 KRaft quorum 命令均成功。
+
+本节尚未创建四个项目主题，也未验证主题在重启后的保留、集群内生产/消费或
+Filebeat→Kafka。plaintext、单副本和 combined KRaft 只适用于本地开发，不代表
+TLS/SASL、高可用或生产容量。liveness 使用 TCP 以避免周期性探针 JVM；它不能
+单独识别“端口仍监听但 Broker API 无响应”的故障。

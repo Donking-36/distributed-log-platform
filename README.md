@@ -39,8 +39,9 @@ UC-004、生产级多节点高可用、多租户、自研网页界面和重复�
 - 外层资源限制：4 CPU、6 GiB 内存
 - Go 工具链和项目基线：1.26.5
 
-Kafka、Filebeat、Elasticsearch 和 Grafana 的镜像版本暂不选定，需先通过
-兼容性冒烟测试。任何部署清单都不得使用 `latest`。
+Kafka 已选定 Apache 官方 JVM 镜像 4.3.1，并通过宿主 Docker 与 Kubernetes
+单节点验证。Filebeat、Elasticsearch 和 Grafana 的镜像版本仍须通过各自兼容性
+冒烟后选定。任何部署清单都不得使用 `latest`。
 
 ## 当前可运行组件
 
@@ -91,12 +92,12 @@ docker run --rm \
 
 ## Kubernetes 本地部署
 
-`deploy/kubernetes/base/log-producer` 保存两个持续运行的 Deployment 和共享运行
-配置；`deploy/kubernetes/base/log-producer-acceptance` 单独保存两个固定批次
-Job。两种形态通过共享 Kustomize Component 固定同一镜像，但不会在一次部署中
-相互启动。`deploy/kubernetes/overlays/local` 创建 `stage3-logs` 命名空间，
-并把持续工作负载的拉取策略收紧为 `Never`；验收 Job 使用独立的
-`deploy/kubernetes/overlays/local-acceptance`。
+`deploy/kubernetes/base/namespace` 统一保存 `stage3-logs` 命名空间和 Restricted
+策略；`base/log-producer` 保存两个持续 Deployment，
+`base/log-producer-acceptance` 保存两个固定批次 Job，`base/kafka` 保存 Kafka
+Service、StatefulSet 和运行配置。持续应用、验收 Job 与有状态 Kafka 分别使用
+`overlays/local`、`overlays/local-acceptance`、`overlays/local-kafka`，共享基础定义
+但独立部署，避免应用更新隐式改动 Broker 或 PVC。
 
 本地 overlay 固定使用已经验证的应用代码提交 `d20fc7f`。首次部署前，先确认
 本地 Docker 中存在该标签并将其旁加载到 Minikube：
@@ -116,6 +117,53 @@ make k8s-status
 如果本地不存在该镜像，应从 Git 提交 `d20fc7f` 构建，不能把其他工作区内容
 冒充为这个标签。`k8s-render` 只输出最终 YAML；`k8s-validate` 使用 API Server
 做服务端 dry-run；`k8s-deploy` 在确认当前上下文为 `stage3-logs` 后才应用。
+
+### Kafka 单节点基线
+
+Kafka base 固定官方多架构索引摘要；本地 Minikube 使用按官方 amd64 摘要拉取、
+再旁加载的 `4.3.1` 标签和 `imagePullPolicy: Never`。Docker daemon 导入 containerd
+时会转换 manifest media type，因此 local overlay 同时记录上游索引、上游 amd64、
+镜像 config 和本地导入 manifest 四个摘要。标签和注解只用于引用与留证，部署
+门禁还会读取节点内的实际 manifest/config 摘要，并在滚动后核对初始化容器与
+主容器的 imageID：
+
+```bash
+docker pull \
+  apache/kafka@sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26
+docker tag \
+  apache/kafka@sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26 \
+  apache/kafka:4.3.1
+minikube image load \
+  -p stage3-logs \
+  --daemon=true \
+  apache/kafka:4.3.1
+
+make k8s-kafka-render
+make k8s-kafka-validate
+make k8s-kafka-image-check
+make k8s-kafka-deploy
+make k8s-kafka-status
+```
+
+`k8s-kafka-deploy` 会自动重复部署前镜像检查，并在 rollout 后执行双容器运行时
+imageID 检查；任一摘要不匹配都会在写入或完成声明前失败。
+
+该入口部署一个 combined KRaft 节点、普通客户端 Service、Headless Service 和
+2 GiB PVC。Broker 请求 250m CPU/768 MiB，限制为 1 CPU/1536 MiB，JVM 堆为
+512 MiB；初始化容器先把镜像自带配置复制到可写配置卷，主容器再生成最终配置。
+两者均以 UID/GID 1000 运行并保持只读根文件系统。自动建主题已关闭，四个项目
+主题将在下一步由独立的幂等初始化流程创建。当前形态使用明文监听器且没有高可用，
+只用于本地开发。
+
+查看 KRaft 状态：
+
+```bash
+kubectl --context=stage3-logs exec -n stage3-logs kafka-0 -- \
+  env KAFKA_GC_LOG_OPTS= KAFKA_HEAP_OPTS=-Xmx64m \
+  /opt/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server localhost:9092 \
+  describe --status
+```
 
 查看两个真实日志源：
 
@@ -188,6 +236,11 @@ make image IMAGE_TAG="$(git rev-parse --short HEAD)"
 make k8s-render
 make k8s-validate
 make k8s-status
+make k8s-kafka-render
+make k8s-kafka-validate
+make k8s-kafka-image-check
+make k8s-kafka-runtime-check
+make k8s-kafka-status
 ```
 
 `make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，且不会
@@ -208,5 +261,7 @@ make k8s-status
 `log-producer` Deployment 已通过 Kustomize 部署到 `stage3-logs`；两个独立
 验收 Job 已验证各输出 20 条连续 JSON。Downward API 身份、安全上下文、资源
 限制和真实日志均已验证。Kafka 4.3.1 官方 JVM 镜像已经固定摘要，并通过宿主
-Docker 单节点 KRaft、主题创建、生产/消费和同键分区冒烟；Kafka Kubernetes
-清单与 Filebeat 尚未部署。
+Docker 单节点主题与生产/消费冒烟；Kubernetes 中的 Service、StatefulSet、
+Restricted 安全上下文、资源边界、2 GiB PVC 和 KRaft DNS 也已验证。同一 PVC
+上的 Pod 重建保留了 KRaft 元数据；主题和消息恢复尚未验证。Kubernetes 主题
+初始化与 Filebeat 尚未部署。
