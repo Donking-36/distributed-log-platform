@@ -30,7 +30,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 cd "${repo_root}"
 
-for command_name in "${KUBECTL}" "${PYTHON}" csplit flock; do
+for command_name in "${KUBECTL}" "${PYTHON}" csplit flock readlink; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     echo "缺少验收命令：${command_name}" >&2
     exit 1
@@ -53,16 +53,10 @@ if [[ "${ACCEPTANCE_RUN_ID}" == "day2-continuous-v1" ]]; then
   exit 1
 fi
 
-# 固定名称 Job 不能并发重建；本地文件锁消除检查与删除之间的竞态。
-lock_dir="/run/user/$(id -u)"
-if [[ ! -d "${lock_dir}" || ! -w "${lock_dir}" ]]; then
-  lock_dir="/tmp"
-fi
-exec 9>"${lock_dir}/distributed-log-platform-log-producer-acceptance-$(id -u).lock"
-if ! flock -n 9; then
-  echo "已有另一个 log-producer 验收正在运行" >&2
-  exit 1
-fi
+# 固定名 Job 与 Filebeat 位点窗口必须共享互斥边界，避免采集验收中途被替换。
+source "${repo_root}/scripts/lib/filebeat-workflow-lock.sh"
+acquire_filebeat_workflow_lock || exit 1
+export FILEBEAT_WORKFLOW_LOCK_INHERITED=1
 
 actual_context="$("${KUBECTL}" config current-context)"
 if [[ "${actual_context}" != "${KUBE_CONTEXT}" ]]; then

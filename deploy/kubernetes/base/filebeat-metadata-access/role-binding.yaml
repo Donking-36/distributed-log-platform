@@ -1,0 +1,18 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: filebeat-pod-metadata-reader
+  namespace: stage3-logs
+  labels:
+    app.kubernetes.io/name: filebeat
+    app.kubernetes.io/component: log-collector
+    app.kubernetes.io/part-of: distributed-log-platform
+    distributed-log-platform.io/purpose: log-collection
+subjects:
+  - kind: ServiceAccount
+    name: filebeat
+    namespace: stage3-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: filebeat-pod-metadata-reader

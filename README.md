@@ -39,14 +39,16 @@ UC-004、生产级多节点高可用、多租户、自研网页界面和重复�
 - 外层资源限制：4 CPU、6 GiB 内存
 - Go 工具链和项目基线：1.26.5
 
-Kafka 已选定 Apache 官方 JVM 镜像 4.3.1，并通过宿主 Docker 与 Kubernetes
-单节点验证。Filebeat、Elasticsearch 和 Grafana 的镜像版本仍须通过各自兼容性
-冒烟后选定。任何部署清单都不得使用 `latest`。
+Kafka 已选定 Apache 官方 JVM 镜像 4.3.1；Filebeat 已选定官方 Wolfi 镜像
+9.4.4。两者均已通过固定摘要、Minikube 运行时和真实消息链路验证。
+Elasticsearch 与 Grafana 的镜像版本仍须通过各自兼容性冒烟后选定。任何部署
+清单都不得使用 `latest`。
 
 ## 当前可运行组件
 
 `log-producer` 是应用日志来源，只向标准输出写入一行一个 JSON 对象，不直接
-连接 Kafka 或 Elasticsearch。Filebeat 后续负责采集这些日志并生产到 Kafka。
+连接 Kafka 或 Elasticsearch。Filebeat DaemonSet 已负责采集这些日志并生产到
+Kafka；业务 JSON 在 Kafka 外层事件的 `message` 中保持原样。
 
 | 环境变量 | 必填 | 默认值 | 作用 |
 |---|---|---|---|
@@ -95,10 +97,13 @@ docker run --rm \
 `deploy/kubernetes/base/namespace` 统一保存 `stage3-logs` 命名空间和 Restricted
 策略；`base/log-producer` 保存两个持续 Deployment，
 `base/log-producer-acceptance` 保存两个固定批次 Job，`base/kafka` 保存 Kafka
-Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主题初始化 Job。
+Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主题初始化 Job；
+`base/filebeat` 与 `base/filebeat-metadata-access` 分别保存采集器和目标命名空间
+Pod-only RBAC。
 持续应用、验收 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
-`overlays/local-acceptance`、`overlays/local-kafka`、`overlays/local-kafka-topics`，
-共享基础定义但独立运行，避免应用或主题操作隐式改动 Broker、Namespace 或 PVC。
+`overlays/local-acceptance`、`overlays/local-kafka`、`overlays/local-kafka-topics`、
+`overlays/local-filebeat`，共享基础定义但独立运行，避免应用、采集或主题操作
+隐式改动其他组件、Namespace 或 PVC。
 
 本地 overlay 固定使用已经验证的应用代码提交 `d20fc7f`。首次部署前，先确认
 本地 Docker 中存在该标签并将其旁加载到 Minikube：
@@ -204,6 +209,63 @@ dry-run，全程不写集群；
 主题级 override。完成的 Job 会保留，作为最近一次执行证据；相关解析正反例已
 纳入默认 `make check`。
 
+### Filebeat 节点采集
+
+Filebeat 9.4.4 Wolfi 运行在独立的 `stage3-collector`。它只读挂载
+`/var/log/containers`、`/var/log/pods`，并把 registry 写入项目专用宿主路径；
+ServiceAccount 只能在 `stage3-logs` 对 Pod 执行 `get/list/watch`。节点日志实际
+为 `root:root 0640`，因此容器以 UID 0 读取，但仍禁止提权、丢弃全部 capability、
+使用只读根文件系统且不启用 privileged。
+
+本地清单使用 `imagePullPolicy: Never`，配置门禁也使用 `--pull=never`；因此新环境
+必须先按官方 linux/amd64 摘要准备并旁加载镜像：
+
+```bash
+docker pull \
+  docker.elastic.co/beats/filebeat-wolfi@sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379
+docker tag \
+  docker.elastic.co/beats/filebeat-wolfi@sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379 \
+  docker.elastic.co/beats/filebeat-wolfi:9.4.4
+minikube image load \
+  -p stage3-logs \
+  --daemon=true \
+  docker.elastic.co/beats/filebeat-wolfi:9.4.4
+```
+
+```bash
+make filebeat-config-check
+make k8s-filebeat-render
+make k8s-filebeat-validate
+make k8s-filebeat-deploy
+make k8s-filebeat-status
+```
+
+Filebeat 9.4.4 的 Kafka 输出协议版本显式固定为 `4.1.0`；这是客户端兼容协议，
+不是 Broker 镜像版本。`4.1.0` 配置正例已经连接 Kafka 4.3.1，故意配置为不受支持
+的 `4.3.1` 时门禁按预期失败。
+
+正常事件只有在 Pod `service` 标签与 Pod UID 都存在时才静态路由，Kafka key 为
+Pod UID。当 `add_kubernetes_metadata` 未能补齐 Pod UID（例如旧 Pod 已从 API
+消失或启动阶段缓存尚未命中）时，严格的日志路径允许列表仍保留来源边界；事件进入
+`logs.unclassified`，`fields.routing_reason=kubernetes_metadata_missing`，key
+改用 Filebeat 指纹 `sha256("|log.file.path|<path>|")` 的小写十六进制结果，避免
+冷启动静默丢弃。
+
+端到端入口先记录四个 Topic 的分区位点，再运行带同一唯一 `test_run_id` 的两个
+固定批次 Job；校验器逐字比较源 stdout 与 Kafka `message`，并验证 Pod UID key、
+Kubernetes 元数据、主题隔离和物理重复。兜底入口只在 Minikube 节点的唯一临时
+路径注入一条 CRI 日志，完成后精确清理：
+
+```bash
+make k8s-filebeat-acceptance
+make k8s-filebeat-fallback-acceptance
+make k8s-filebeat-registry-recovery
+```
+
+三个入口均已通过。`k8s-filebeat-registry-recovery` 是有写操作的恢复验收：它会
+先核对 DaemonSet owner 和 registry 身份，再精确删除当前 Filebeat Pod，证明旧
+批次不回放且独立新批次仍可到达；不要把它当作只读状态检查。
+
 查看两个真实日志源：
 
 ```bash
@@ -285,8 +347,9 @@ make k8s-kafka-topics-validate
 make k8s-kafka-topics-status
 ```
 
-`make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，且不会
-修改工作区。需要主动格式化代码时执行 `make fmt`。
+`make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，并执行所有
+Shell 脚本语法检查、Kafka 主题解析自测及 Filebeat Kafka 校验器十项标准库测试；
+它不会修改工作区。需要主动格式化代码时执行 `make fmt`。
 
 ## 开发流程
 
@@ -307,5 +370,10 @@ Docker 单节点主题与生产/消费冒烟；Kubernetes 中的 Service、State
 Restricted 安全上下文、资源边界、2 GiB PVC 和 KRaft DNS 也已验证。同一 PVC
 上的 Pod 重建保留了 KRaft 元数据。独立主题初始化 Job 已显式创建四个项目主题，
 双次运行保持 Topic ID 不变；在不重跑 Job 的前提下重建 Broker Pod 后，四个
-Topic ID、拓扑和配置仍保持。Kubernetes 集群内生产/消费、消息恢复与 Filebeat
-尚未验证。
+Topic ID、拓扑和配置仍保持。Filebeat 9.4.4 Wolfi 已以独立 DaemonSet 部署，
+镜像、Pod-only RBAC、精确 hostPath、registry、安全上下文和 Kafka 连接门禁均
+通过。唯一批次的 api/worker 共 40 条逻辑事件已完成四主题有界位点对账，0 物理
+重复、无跨主题路由；元数据缺失 fixture 也已用稳定路径指纹进入
+`logs.unclassified`。Filebeat Pod 重建后，宿主 registry 与 Beat UUID 保持，旧
+批次 0 回放且新批次 40/40 到达。Kafka 中断恢复和 Kafka 消息持久化恢复仍待独立
+验证。

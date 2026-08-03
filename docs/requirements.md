@@ -44,7 +44,8 @@
 **则**
 
 - Filebeat 从 Kubernetes 节点容器日志目录采集事件。
-- 每条事件包含命名空间、Pod 名称/UID、容器标识和服务名等必要元数据。
+- Kubernetes API 仍可解析的目标事件包含命名空间、Pod 名称/UID、容器标识和
+  服务标签等必要元数据。
 - 受控的 Pod `service` 标签是服务身份与路由的权威来源；Filebeat 据此选择
   主题，`log-processor` 校验它与原始 `service.name` 一致后，将该标签规范化
   为最终 `service.name`。
@@ -52,9 +53,16 @@
 - 两个主题中均能观察到 20 个预期唯一序号；原始 Kafka 物理消息允许因至少一次投递而重复。
 - 未知或缺失服务标签不能生成任意主题，只能进入 `logs.unclassified`，且不由
   正常处理器消费。
+- 严格路径允许列表命中、但 `add_kubernetes_metadata` 未能补齐 Pod UID 时
+  （例如旧 Pod 已从 API 消失或启动阶段缓存尚未命中），
+  Filebeat 不得静默丢弃；事件进入 `logs.unclassified`，标记
+  `fields.routing_reason=kubernetes_metadata_missing`，并使用源文件路径指纹作为
+  稳定 Kafka key。指纹为 `sha256("|log.file.path|<path>|")` 的小写十六进制
+  结果；该例外不伪造 Pod UID，也不进入正常处理器。
 - 已知标签与原始 `service.name` 不一致的事件由 `log-processor` 视为永久无效
   事件并写入 `logs.dlq`。
-- 非目标工作负载及 Filebeat 自身日志不会进入这些业务主题。
+- 未命中 `stage3-logs`、`log-producer` 精确路径允许列表的工作负载及 Filebeat
+  自身日志不会进入这些业务主题。
 
 ### 3.2 UC-001B：Kafka 日志幂等写入 Elasticsearch
 
@@ -82,6 +90,8 @@
 - 临时 Kafka 消费者能展示 `api-service`、`worker-service` 的真实原始消息；不以 Filebeat 自身日志代替链路证据。
 - 两个受控服务正确路由到各自的主题，20 个预期唯一序号均可观察到。
 - Kafka 事件包含验收所需的 Kubernetes 元数据。
+- 无 API 元数据的节点日志 fixture 只进入 `logs.unclassified`，路径指纹 key 与
+  原始 `message` 可复算，临时节点文件在验收后精确清理。
 - 在同一 `test_run_id`、声明的缓冲容量和故障窗口内，N 个逻辑唯一输入对应 N 个 Elasticsearch 唯一文档。
 - 对同一事件重复投递后，唯一文档数不增加。
 - `log-processor` 重启后能够继续处理。
@@ -126,7 +136,7 @@
 | `test_run_id` | 同一验收批次跨服务共享的标识；生产事件允许为空 |
 | `kubernetes.namespace` | 目标命名空间 |
 | `kubernetes.pod.name` | Pod 名称 |
-| `kubernetes.pod.uid` | Pod 稳定身份的一部分 |
+| `kubernetes.pod.uid` | Kubernetes API 可解析的业务事件必须包含；元数据失效的未分类事件不得伪造 |
 | `container.id` | 容器身份 |
 | `log.file.path` | 采集来源 |
 | `log.offset` | 源日志位置，用于稳定标识 |
@@ -135,7 +145,8 @@
 字段责任边界：
 
 - `log-producer` 产生事件时间、序号、级别、正文、原始服务名和测试批次。
-- Filebeat 补充 Kubernetes、容器、文件路径和偏移元数据，并按权威标签路由。
+- Filebeat 补充 Kubernetes、容器、文件路径和偏移元数据，并按权威标签路由；
+  元数据已失效时只保留可证明的采集字段并进入未分类主题。
 - `log-processor` 校验服务身份，规范化最终字段，生成 `event_id` 和 `ingested_at`。
 
 ## 6. 非功能要求与量化口径
