@@ -392,3 +392,141 @@ Pod UID 改变，PVC UID 与主题 Job UID 不变。新 Broker Ready 后、任�
 多 Broker 副本恢复、TLS/SASL、高可用或生产容量。四个主题的创建不是事务；若
 中途失败，只有已经创建且契约正确的主题可以保留并由重跑继续创建余下主题；
 任何漂移都会继续失败并要求人工判断处理，不能宣称自动收敛或原子完成。
+
+## Filebeat 9.4.4：Kubernetes 采集、路由与兜底验收
+
+- 日期：2026-08-03
+- Kubernetes：v1.35.1，containerd 2.2.1
+- Filebeat：`docker.elastic.co/beats/filebeat-wolfi:9.4.4`
+- Kafka：4.3.1，Filebeat 协议版本显式设为 `4.1.0`
+
+### 镜像与配置门禁
+
+上游多架构索引摘要为
+`sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca`，
+linux/amd64 清单摘要为
+`sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379`。
+镜像旁加载到 Minikube 节点后，实际 manifest 摘要为
+`sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9`，
+CRI config 摘要为
+`sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf`。
+部署前门禁核对了架构、上游 amd64 清单、节点 manifest/config；部署后又核对
+Pod 的 `imageID`，三层身份均匹配。
+
+`filebeat test config` 的基础正例与 `output.kafka.version: "4.1.0"` 正例均输出
+`Config OK`。故意改为 Filebeat 不支持的 `4.3.1` 时，命令退出码为 1，且错误信息
+明确指出 Kafka 版本不受支持，证明门禁不会把连接成功误当成协议配置正确。
+
+### 部署、安全与采集边界
+
+Filebeat 以单节点 DaemonSet 运行在项目专用 `stage3-collector` 命名空间；应用继续
+保留在 Restricted 的 `stage3-logs`。采集器命名空间因只读 `hostPath` 使用
+Privileged enforce、Restricted warn/audit，但容器本身保持 `privileged=false`、
+禁止提权、丢弃全部 capabilities、RuntimeDefault seccomp 和只读根文件系统。
+容器使用 UID/GID 0 读取节点上实际为 `root:root 0640` 的日志文件；它没有 Docker
+socket，唯一宿主写路径是项目专用 Filebeat registry。
+
+跨命名空间 RBAC 仅允许专用 ServiceAccount 对 `stage3-logs` Pod 执行
+`get/list/watch`。运行时反例确认它不能读取 Secret、Node、Namespace、
+`kube-system` Pod，也不能创建 Pod。最终 DaemonSet 为 1 个 Running/Ready Pod、
+0 重启；资源请求为 50m CPU/128 MiB，限制为 500m CPU/256 MiB，部署后观测内存
+当前值约 46.4 MiB、峰值约 79.8 MiB。
+
+采集器只扫描
+`/var/log/containers/*_stage3-logs_log-producer-*.log`，使用固定 `filestream` ID 和
+CRI stdout parser。业务 JSON 不在 Filebeat 中展开，而是逐字保留在 `message`；
+`log-processor` 后续负责业务校验、规范化与 `event_id`。已知 Pod `service` 标签
+静态路由到两个业务主题，未知或暂时缺少元数据的事件进入 `logs.unclassified`；
+Filebeat 从不写 `logs.dlq` 或 Elasticsearch。
+
+初版配置曾对缺少 Kubernetes 元数据的事件执行 `drop_event`。启动统计显示读取
+50,632 条时有 29,211 条被过滤，旧容器日志与元数据缓存就绪竞态都可能触发数据
+丢失。最终配置删除该过滤器：存在 Pod UID 时以 UID 作为 Kafka key；缺少元数据
+时以 `log.file.path` 的稳定指纹作为 key，并写入
+`fields.routing_reason=kubernetes_metadata_missing`。
+
+### 正常 api/worker 路由验收
+
+运行入口为 `make k8s-filebeat-acceptance`。脚本先记录四个主题各分区的起始位点，
+再用唯一批次启动两个各 20 条的 `log-producer` Job，最后只消费本次起止位点范围，
+由独立 Python 验证器按 `test_run_id` 严格对账。
+
+最终批次为 `uc001-filebeat-2db71a8adcea4a828cbeed7c7563d779`，结果如下：
+
+```text
+api-service:    20 logical events, partition 1
+worker-service: 20 logical events, partition 2
+total:          40 logical events, 40 physical records, 0 duplicates
+unclassified:   0 matching events
+dlq:            0 matching events
+```
+
+每条事件均验证了原始 `message` 字节、连续 `event.sequence=1..20`、服务主题、
+`kubernetes.namespace=stage3-logs`、Pod 名称、真实 Pod UID、容器名、
+`filestream`/stdout 来源和 Filebeat 版本。Kafka key 与实际 Pod UID 完全相同，
+同一 Pod 的全部事件落入同一分区。消费范围内还包含持续 Deployment 的正常日志，
+验证器通过唯一批次 ID 排除它们，没有把旧数据误计为验收成功。
+
+### 缺少元数据的兜底验收
+
+`make k8s-filebeat-fallback-acceptance` 在 Minikube 节点创建一条大于 1024 字节的
+临时 CRI 日志和对应 `/var/log/containers` 符号链接，路径仍满足项目采集范围，
+但不对应真实 Pod。最终批次
+`uc001-fallback-30b700c86c1e424eaf985da8c794ed61` 使
+`logs.unclassified` 分区 0 从位点 7 增长到 8；验证结果为 1 条逻辑事件、
+1 条物理记录、0 重复。
+
+该事件完整保留原始 `message`，没有伪造 Pod UID，包含明确的 metadata-missing
+原因，Kafka key 与从真实 `log.file.path` 重新计算的指纹一致。第一次真实运行
+`uc001-fallback-f7cab9d6a754406baf6b685024376262` 按预期暴露了验证器少计算末尾
+字段分隔符的问题；修正为与 Filebeat fingerprint processor 完全相同的输入格式后，
+单元测试和真实复跑均通过。两轮临时日志、符号链接和空目录均已按精确路径清理，
+节点上没有残留 `filebeat-fallback-*` 文件。
+
+双条件路由部署后的第一次兜底回归
+`uc001-fallback-cce9cefba07844f080d5e964f812fa24` 超时，证明放在伪 Pod 目录中的
+fixture 可能被 kubelet 在 Filebeat scanner 命中前当作孤儿日志清理。测试没有降低
+等待或判定标准；最终实现把唯一临时文件放入真实 Running `api-service` Pod 的受管
+日志目录，但符号链接仍使用不存在的容器 ID，确保 Kubernetes 元数据无法补齐。
+最终批次 `uc001-fallback-b24cea7aeb474cbb948aad51f61c9fe7` 使
+`logs.unclassified` 位点从 12 增长到 13，1 条逻辑/1 条物理/0 重复，再次验证
+原始消息、缺失原因和路径指纹。临时文件与符号链接均已删除。
+
+### Filebeat registry Pod 重建恢复
+
+入口为 `make k8s-filebeat-registry-recovery`。整个流程使用统一工作流锁；部署、
+普通验收、兜底验收和恢复验收不能并发替换 Filebeat Pod 或固定名 Job。删除前，
+脚本严格核对单个 Running/Ready Filebeat Pod 的 controller owner 为同一
+`DaemonSet/filebeat` UID，并保留重建前两个固定验收 Job、Pod 与节点日志到完整
+恢复窗口结束。
+
+重建前批次为 `uc001-registry-pre-533e753f6e1947beb705952d3018d0c4`，两个服务
+各 20 条均完成主题、Pod UID key、Kubernetes 元数据和原始消息对账。随后记录四
+主题高水位并删除该 Filebeat Pod。恢复身份如下：
+
+```text
+old Pod UID=8f23ed3e-d4ed-4eea-bd91-7151857f57e8
+new Pod UID=a7d3ee84-760c-4607-8c55-e8b9e9fa094b
+registry root device:inode=2096:328901
+meta.json device:inode=2096:328984
+Beat UUID=d13edf01-7908-4639-9b42-939ca013e482
+first_start=2026-08-03T06:01:58.696671607Z
+```
+
+新 Pod 位于同一节点、Running/Ready、0 重启，运行时镜像摘要仍匹配；Pod 内 data
+挂载与节点 registry 的 device/inode 相同。目录身份、`meta.json` inode、UUID 和
+`first_start` 前后逐项一致，registry 日志文件存在且非空。
+
+重建后使用不替换 pre Job 的独立名称 Job，批次为
+`uc001-registry-post-b4931e51fd7b4dbd9c00b5695907c26b`。结果为 40 条逻辑事件、
+40 条物理记录、0 重复；收齐后继续观察 20 秒并消费到最终高水位。在从 pre 批次
+完成到 post 稳定窗口结束的全部四主题记录中，结构化解析确认旧 pre run-id 再次
+出现 0 次；窗口结束时 pre Job/Pod UID 未变，节点源日志仍包含完整 pre run-id。
+恢复专用 Job 最后按 UID、用途和 run-id 三重匹配后前台删除，没有残留。
+
+### 当前边界
+
+本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
+分区键、Kubernetes 元数据、原始消息保持、缺少元数据时的稳定兜底以及 Filebeat
+Pod 重建后的 registry 连续性。它尚未证明 Kafka 短时中断后的积压恢复、Kafka
+消息在 Broker Pod 重建后的保留，也不代表多节点高可用、TLS/SASL 或生产容量。

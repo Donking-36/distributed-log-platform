@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: stage3-collector
+  labels:
+    app.kubernetes.io/name: filebeat
+    app.kubernetes.io/component: log-collector
+    app.kubernetes.io/part-of: distributed-log-platform
+    distributed-log-platform.io/purpose: log-collection
+spec:
+  revisionHistoryLimit: 2
+  minReadySeconds: 5
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: filebeat
+      app.kubernetes.io/component: log-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: filebeat
+        app.kubernetes.io/component: log-collector
+        app.kubernetes.io/part-of: distributed-log-platform
+        distributed-log-platform.io/purpose: log-collection
+    spec:
+      serviceAccountName: filebeat
+      # Kubernetes 元数据处理器需要该专用账号的投影 Token。
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      # 当前镜像身份只对 linux/amd64 完成摘要验证，禁止调度到未验收的平台。
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      securityContext:
+        # 节点日志实际为 root:root 0640；只使用 root 读取精确 hostPath，不启用 privileged。
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: filebeat
+          image: docker.elastic.co/beats/filebeat-wolfi:unconfigured
+          imagePullPolicy: IfNotPresent
+          args:
+            - -e
+            - -c
+            - /etc/filebeat.yml
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: 50m
+              # 实测启动峰值约 80 MiB，按 128 MiB 申请避免低估调度需求。
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: config
+              mountPath: /etc/filebeat.yml
+              subPath: filebeat.yml
+              readOnly: true
+            - name: registry
+              mountPath: /usr/share/filebeat/data
+            - name: container-logs
+              mountPath: /var/log/containers
+              readOnly: true
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: filebeat-config
+            defaultMode: 0440
+        # registry 保留读取进度；Pod 重建时不能改用 emptyDir。
+        - name: registry
+          hostPath:
+            path: /var/lib/distributed-log-platform/filebeat-data
+            type: DirectoryOrCreate
+        # containers 中的绝对符号链接依赖 pods 目录，两者都只读且不挂载整个 /var/log。
+        - name: container-logs
+          hostPath:
+            path: /var/log/containers
+            type: Directory
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

@@ -1,7 +1,7 @@
 # 架构
 
-- 状态：第 1 天基线
-- 更新日期：2026-07-30
+- 状态：UC-001A 已验证基线
+- 更新日期：2026-08-03
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
 ## 1. 目标与约束
@@ -94,7 +94,7 @@ UC-001/UC-002 验收链路全绿之后。
 - Minikube 配置实例：`stage3-logs`，Docker 驱动，containerd 运行时。
 - 已验证的外层限制：4 CPU、6 GiB 内存。
 - 应用命名空间：`stage3-logs`，使用 Pod Security Restricted enforce。
-- 采集命名空间：后续引入 `stage3-collector`，只放 Filebeat 等节点采集组件。
+- 采集命名空间：`stage3-collector`，只放 Filebeat 等节点采集组件。
   Filebeat 所需 `hostPath` 不被 Baseline/Restricted enforce 允许，因此该命名
   空间使用 Privileged enforce，同时保留 Restricted warn/audit；不降低
   `stage3-logs` 的准入级别。
@@ -131,10 +131,21 @@ UC-001/UC-002 验收链路全绿之后。
   Job 请求 50m CPU/128 MiB、限制 500m CPU/384 MiB，CLI 堆为 32～128 MiB；
   `activeDeadlineSeconds=180`、`backoffLimit=0`，宿主 runner 默认 300 秒超时用于
   等待终态并收集诊断，而不是给 Job 延长执行时间。
-- Filebeat 只在 `stage3-collector` 挂载必要的宿主机日志路径和 `registry`
-  路径，使用 `stage3-logs` 目标工作负载允许列表，并排除自身及基础设施日志。
-- Filebeat 可能需要 `hostPath` 访问和集群级只读元数据权限；这些权限不允许
-  修改项目命名空间之外的资源。
+- Filebeat 只在 `stage3-collector` 只读挂载 `/var/log/containers` 与
+  `/var/log/pods`，唯一宿主写路径为项目专用 registry
+  `/var/lib/distributed-log-platform/filebeat-data`。稳定 `filestream` ID 和精确
+  glob 只允许 `stage3-logs` 中容器名为 `log-producer` 的日志，不启用
+  autodiscover、runtime socket 或整个 `/var/log` 挂载。
+- Filebeat ServiceAccount 只通过 `stage3-logs` 中的 Role 获得 Pod
+  `get/list/watch`，不使用 ClusterRole，也不能读取 Secret、节点、其他命名空间
+  Pod 或执行写操作。节点日志实际为 `root:root 0640`，容器因此以 UID/GID 0
+  读取，但仍为 `privileged=false`、禁止提权、丢弃全部 capability、只读根文件
+  系统和 RuntimeDefault seccomp。
+- Filebeat 固定调度到 linux/amd64，资源请求为 50m CPU/128 MiB，限制为
+  500m CPU/256 MiB。实测 cgroup 当前内存约 46 MiB、启动峰值约 80 MiB。
+  未启用 Filebeat 的技术预览 HTTP 指标端点，以免为形式化 probe 暴露内部指标；
+  进程退出由 kubelet 重启，Kafka 投递能力由 Pod 内 output 检查和端到端消息验收
+  证明。
 
 完整技术栈必须在外层 4 CPU、6 GiB 限制内保留余量。`log-producer` 本地
 开发基线已通过部署冒烟：每个 Pod 请求 10m CPU/16 MiB 内存，上限为
@@ -158,10 +169,16 @@ Kafka 的 startup/readiness 探针执行 Broker API 命令；liveness 使用 TCP
 |---|---:|---:|---|
 | `logs.api-service` | 3 | 1 | `api-service` 事件 |
 | `logs.worker-service` | 3 | 1 | `worker-service` 事件 |
-| `logs.unclassified` | 1 | 1 | 未知或缺失服务标签的固定兜底主题 |
+| `logs.unclassified` | 1 | 1 | 未知/缺失服务标签或 Kubernetes 元数据失效事件的固定兜底主题 |
 | `logs.dlq` | 1 | 1 | 永久无效事件和处理证据 |
 
-已知服务使用稳定的 Pod UID 作为分区键。未知标签不能创建任意主题名。四个主题
+已知服务只有在标签与 Pod UID 都存在时才进入业务主题，并使用稳定的 Pod UID
+作为分区键。严格路径允许列表命中但 `add_kubernetes_metadata` 未补齐 Pod UID 时
+（例如旧 Pod 已从 API 消失或启动阶段缓存尚未命中），事件不被丢弃或伪造 Pod
+UID，而是标记 `fields.routing_reason=kubernetes_metadata_missing`，使用
+`sha256("|log.file.path|<path>|")` 的小写十六进制 Filebeat 指纹作为稳定 key，
+并进入 `logs.unclassified`。未知标签不能
+创建任意主题名。四个主题
 都显式设置 `cleanup.policy=delete`、`retention.ms=86400000`、
 `retention.bytes=134217728`、`segment.bytes=67108864` 和
 `min.insync.replicas=1`。时间或容量条件任一满足即可淘汰旧段；
@@ -232,8 +249,8 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | Minikube | 本地已验证：1.38.1 | `minikube version` / 配置实例证据 |
 | Kubernetes | 集群已验证：v1.35.1 | `stage3-logs` 节点为 Ready |
 | containerd | 集群已验证：2.2.1 | 节点运行时输出 |
-| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、Broker/初始化 Job 运行时 imageID、主题初始化幂等性及同一 PVC 上的主题元数据恢复通过；集群内消息生产/消费和消息恢复尚未验证 |
-| Filebeat 镜像 | 待定 | 通过 Filebeat→Kafka 配置/输出检查，并保留必需的真实事件字段 |
+| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、Broker/初始化 Job 运行时 imageID、主题初始化幂等性、同一 PVC 上的主题元数据恢复及 Filebeat 集群内生产/消费通过；消息恢复尚未验证 |
+| Filebeat 镜像 | 已验证：`docker.elastic.co/beats/filebeat-wolfi:9.4.4@sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca` | 上游 linux/amd64 manifest `sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379`；节点转换后 manifest/config 为 `sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9` / `sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf`；Kafka 客户端协议固定为 Filebeat 支持的 `4.1.0` 并连接 Kafka 4.3.1；配置、运行时 imageID、正常路由和元数据失效兜底均通过 |
 | Elasticsearch 镜像 | 待定 | 健康、模板、索引和查询冒烟测试通过后固定镜像标签和摘要 |
 | Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
 | Go Kafka 客户端 | 待定 | 仅在 Kafka 协议冒烟测试通过后选定，并记录理由 |
@@ -263,14 +280,19 @@ digest。
 
 ## 9. 验证层次
 
-1. 静态/配置：Go 格式检查与 `vet`、Kustomize 构建、一次性 Job 资源边界与
-   服务端准入、Filebeat 配置/输出检查、Grafana 自动配置验证。
+1. 静态/配置：Go 格式检查与 `vet`、Shell 语法、Kustomize 构建、一次性 Job
+   资源边界与服务端准入、Filebeat 固定镜像配置正反例和十项 Kafka 校验器单测、
+   Grafana 自动配置验证。
 2. 单元：解析、必填字段、级别规范化、确定性 ID 和重试分类。
 3. 集成：一条 Kafka 记录对应一个 Elasticsearch 文档；重复输入仍只产生
    一份唯一文档。
-4. 端到端：两个演示服务使用固定 `test_run_id`，数据最终可在 Grafana 中查看。
-5. 恢复：Kafka Broker Pod 替换后 Topic ID/拓扑/配置保持；后续再验证
-   `log-processor` 重启、演示 Pod 替换和有界的 Kafka 不可用故障。
+4. 端到端：Filebeat 按 Kafka 有界位点验证两个演示服务的唯一 `test_run_id`、
+   Pod UID key、原始消息和主题隔离；元数据失效 fixture 验证未分类路径指纹。
+   完整链路后续继续验证数据最终可在 Grafana 中查看。
+5. 恢复：Kafka Broker Pod 替换后 Topic ID/拓扑/配置保持；Filebeat Pod 重建时
+   registry 目录、`meta.json` 身份和 Beat UUID 保持，旧批次不回放且新批次完整
+   到达。后续再验证 `log-processor` 重启、演示 Pod 替换和有界的 Kafka 不可用
+   故障。
 6. 性能：声明事件大小、速率和持续时间，并记录 p50/p95/p99、错误率和
    唯一文档数。
 
@@ -279,10 +301,10 @@ digest。
 
 ## 10. 延期决策
 
-- Kafka 的 TLS/SASL、多节点控制器隔离、生产容量与生产保留策略；Filebeat、
-  Elastic 和 Grafana 镜像的精确固定版本。
-- Filebeat、Elasticsearch、Grafana 和后续 Go 组件的精确堆内存、资源请求、
-  资源限制和数据保留值。
+- Kafka 的 TLS/SASL、多节点控制器隔离、生产容量与生产保留策略；Elastic 和
+  Grafana 镜像的精确固定版本。
+- Filebeat 的生产容量调优，以及 Elasticsearch、Grafana 和后续 Go 组件的精确
+  堆内存、资源请求、资源限制和数据保留值。
 - UC-003 告警、Prometheus、HPA 和多分区扩缩容实验。
 - 生产级可用性、安全性和跨集群采集。
 

@@ -1,0 +1,98 @@
+filebeat.inputs:
+  - type: filestream
+    id: stage3-log-producer-container-logs-v1
+    paths:
+      # 文件名本身构成第一层允许列表，只接收目标命名空间中的 log-producer。
+      - /var/log/containers/*_stage3-logs_log-producer-*.log
+    prospector:
+      scanner:
+        fingerprint.enabled: true
+        symlinks: true
+    file_identity.fingerprint: ~
+    parsers:
+      - container:
+          stream: stdout
+          format: cri
+    processors:
+      - add_kubernetes_metadata:
+          host: ${NODE_NAME}
+          namespace: stage3-logs
+          use_kubeadm: false
+          add_resource_metadata:
+            node:
+              enabled: false
+            namespace:
+              enabled: false
+            deployment: false
+            cronjob: false
+          default_indexers.enabled: false
+          default_matchers.enabled: false
+          indexers:
+            - container:
+          matchers:
+            - logs_path:
+                logs_path: /var/log/containers/
+                resource_type: container
+      # Pod UID 未补齐时，以源文件生成稳定兜底键，覆盖旧 Pod 消失和元数据缓存冷启动。
+      - fingerprint:
+          fields:
+            - log.file.path
+          target_field: '@metadata.kafka_key'
+          method: sha256
+          encoding: hex
+          ignore_missing: false
+          when:
+            not:
+              has_fields:
+                - kubernetes.pod.uid
+      - add_fields:
+          target: fields
+          fields:
+            routing_reason: kubernetes_metadata_missing
+          when:
+            not:
+              has_fields:
+                - kubernetes.pod.uid
+      # 元数据存在时保持 Pod UID 作为 Kafka key；目标字段与上面的兜底分支互斥。
+      - copy_fields:
+          fields:
+            - from: kubernetes.pod.uid
+              to: '@metadata.kafka_key'
+          fail_on_error: true
+          ignore_missing: false
+          when:
+            has_fields:
+              - kubernetes.pod.uid
+
+output.kafka:
+  hosts:
+    - kafka.stage3-logs.svc.cluster.local:9092
+  # Filebeat 当前支持的最高协议版本为 4.1.0，可连接更新的 Kafka 4.3.1 Broker。
+  version: "4.1.0"
+  client_id: stage3-filebeat
+  topic: logs.unclassified
+  topics:
+    - topic: logs.api-service
+      when:
+        and:
+          - equals:
+              kubernetes.labels.service: api-service
+          - has_fields:
+              - kubernetes.pod.uid
+    - topic: logs.worker-service
+      when:
+        and:
+          - equals:
+              kubernetes.labels.service: worker-service
+          - has_fields:
+              - kubernetes.pod.uid
+  # 正常事件使用 Pod UID；UID 未补齐的日志使用源文件指纹并进入未分类主题。
+  key: '%{[@metadata.kafka_key]}'
+  partition.hash:
+    reachable_only: false
+  required_acks: -1
+  compression: gzip
+
+logging.level: info
+logging.metrics.enabled: true
+logging.metrics.period: 30s

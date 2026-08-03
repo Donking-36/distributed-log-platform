@@ -1,0 +1,19 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: filebeat-pod-metadata-reader
+  namespace: stage3-logs
+  labels:
+    app.kubernetes.io/name: filebeat
+    app.kubernetes.io/component: log-collector
+    app.kubernetes.io/part-of: distributed-log-platform
+    distributed-log-platform.io/purpose: log-collection
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch

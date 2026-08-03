@@ -2,6 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-07-30
+- 更新日期：2026-08-03
 
 ## 背景
 
@@ -46,13 +47,17 @@ Pod 标准输出
 - 同一个日志源镜像分别部署为 `api-service` 和 `worker-service`；
 - 主题为 `logs.api-service` 和 `logs.worker-service`；
 - 每个业务主题有三个分区，副本因子为 1；
-- 使用稳定的 Pod UID 作为分区键；
+- Kubernetes 服务标签与 Pod UID 都存在时使用稳定的 Pod UID 作为分区键；
 - Pod `service` 标签是服务身份和路由的权威来源，Deployment 通过
   Downward API 把它注入 `PRODUCER_SERVICE_NAME`；
 - `log-processor` 校验原始 `service.name` 与权威标签是否一致，不一致的
   事件进入 `logs.dlq`；
 - 未知或缺失的服务标签只能进入固定的 `logs.unclassified`，绝不据此动态
   创建主题。
+- 严格路径允许列表命中、但 `add_kubernetes_metadata` 未补齐 Pod UID 时
+  （例如旧 Pod 已从 API 消失或启动阶段缓存尚未命中），Filebeat 不丢弃事件或
+  伪造 Pod UID；它以 `sha256("|log.file.path|<path>|")` 的小写十六进制指纹
+  作为稳定 key，标记元数据失效原因，并写入 `logs.unclassified`。
 
 每个服务使用三个分区，可以在不改变初始主题契约的情况下开展后续消费者扩容
 实验。副本因子为 1 是明确的单节点开发选择，不代表
@@ -105,6 +110,8 @@ Pod 标准输出
   且不存在跨主题路由或 Filebeat 递归采集。
 - 缺失或未知服务标签的事件只进入 `logs.unclassified`，不会创建任意
   主题，也不会被正常处理器消费。
+- 无 API 元数据的节点日志 fixture 使用可复算的路径指纹 key，只进入
+  `logs.unclassified`，原始 `message` 保持不变，临时节点文件验收后精确清理。
 - 演示事件无需人工写入 Elasticsearch 即可到达。
 - 对一个固定的 `test_run_id`，在声明的测试边界内，N 个逻辑唯一输入产生
   N 个 Elasticsearch 唯一文档，并可通过已预置的 Grafana

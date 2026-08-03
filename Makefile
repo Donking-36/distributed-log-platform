@@ -9,6 +9,7 @@ KUBECTL ?= kubectl
 GO_VERSION := 1.26.5
 EXPECTED_GO_VERSION := go$(GO_VERSION)
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*')
+SHELL_FILES := $(shell find scripts -type f -name '*.sh')
 IMAGE_REPOSITORY ?= distributed-log-platform/log-producer
 IMAGE_TAG ?= dev
 KUBE_CONTEXT ?= stage3-logs
@@ -17,28 +18,54 @@ KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
 KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
 KUSTOMIZE_KAFKA_OVERLAY ?= deploy/kubernetes/overlays/local-kafka
 KUSTOMIZE_KAFKA_TOPICS_OVERLAY ?= deploy/kubernetes/overlays/local-kafka-topics
+KUSTOMIZE_FILEBEAT_OVERLAY ?= deploy/kubernetes/overlays/local-filebeat
 ACCEPTANCE_RUN_ID ?=
 ACCEPTANCE_TIMEOUT ?= 60s
 KAFKA_ROLLOUT_TIMEOUT ?= 300s
 KAFKA_TOPIC_INIT_TIMEOUT ?= 300s
+FILEBEAT_NAMESPACE ?= stage3-collector
+FILEBEAT_ROLLOUT_TIMEOUT ?= 180s
+FILEBEAT_ACCEPTANCE_TIMEOUT ?= 120s
+FILEBEAT_ACCEPTANCE_SETTLE_SECONDS ?= 5
+FILEBEAT_ACCEPTANCE_MAX_RECORDS ?= 5000
+FILEBEAT_FALLBACK_TIMEOUT ?= 120s
+FILEBEAT_RECOVERY_TIMEOUT ?= 180s
+FILEBEAT_RECOVERY_SETTLE_SECONDS ?= 20
+FILEBEAT_VERSION ?= 9.4.4
+FILEBEAT_LOCAL_IMAGE ?= docker.elastic.co/beats/filebeat-wolfi:9.4.4
 
 # 这些值与 local-kafka overlay 构成同一镜像身份基线，更新时必须连同证据一起修改。
 override KAFKA_NODE_IMAGE := docker.io/apache/kafka:4.3.1
 override EXPECTED_KAFKA_MANIFEST_DIGEST := sha256:f8f865a3222d807cf1e6c515ca447cb2fb604ddc57f0a007a02a9ce79bd7a511
 override EXPECTED_KAFKA_CONFIG_DIGEST := sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11
 
+# Filebeat 使用官方 Wolfi 9.4.4；旁加载转换后的摘要必须与上游证据分别保存。
+override FILEBEAT_NODE_IMAGE := docker.elastic.co/beats/filebeat-wolfi:9.4.4
+override EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST := sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca
+override EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST := sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379
+override EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST := sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9
+override EXPECTED_FILEBEAT_CONFIG_DIGEST := sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf
+
 # 镜像校验脚本只读取显式导出的项目参数，不自行维护另一份摘要常量。
 export MINIKUBE KUBECTL KUBE_CONTEXT KUBE_NAMESPACE KAFKA_NODE_IMAGE
 export EXPECTED_KAFKA_MANIFEST_DIGEST EXPECTED_KAFKA_CONFIG_DIGEST
 export KUSTOMIZE_KAFKA_TOPICS_OVERLAY KAFKA_TOPIC_INIT_TIMEOUT
+export DOCKER KUSTOMIZE_FILEBEAT_OVERLAY FILEBEAT_NAMESPACE FILEBEAT_ROLLOUT_TIMEOUT FILEBEAT_LOCAL_IMAGE
+export FILEBEAT_ACCEPTANCE_TIMEOUT FILEBEAT_ACCEPTANCE_SETTLE_SECONDS FILEBEAT_ACCEPTANCE_MAX_RECORDS FILEBEAT_VERSION
+export FILEBEAT_FALLBACK_TIMEOUT FILEBEAT_RECOVERY_TIMEOUT FILEBEAT_RECOVERY_SETTLE_SECONDS
+export FILEBEAT_NODE_IMAGE EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST
+export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
 
-.PHONY: check version-check fmt fmt-check vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
+.PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
 	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status k8s-kafka-topics-render \
-	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test
+	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test \
+	filebeat-config-check k8s-filebeat-render k8s-filebeat-validate k8s-filebeat-image-check \
+	k8s-filebeat-runtime-check k8s-filebeat-deploy k8s-filebeat-status k8s-filebeat-acceptance \
+	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
-check: version-check fmt-check vet test build kafka-topic-initializer-test
+check: version-check fmt-check shell-check filebeat-validator-test vet test build kafka-topic-initializer-test
 
 # version-check 保证本地命令使用仓库约定的 Go 工具链。
 version-check:
@@ -65,6 +92,14 @@ fmt-check:
 		echo "$$files"; \
 		exit 1; \
 	fi
+
+# shell-check 只做语法门禁，不引入 Docker 或 Kubernetes 依赖。
+shell-check:
+	bash -n $(SHELL_FILES)
+
+# Filebeat Kafka 校验器使用纯标准库 fixture 覆盖成功、未收齐与契约错误分支。
+filebeat-validator-test:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest scripts.test_validate_filebeat_kafka_output
 
 vet:
 	$(GO) vet ./...
@@ -204,6 +239,58 @@ k8s-kafka-topics-status:
 		-n $(KUBE_NAMESPACE) \
 		-l distributed-log-platform.io/purpose=topic-initialization \
 		-o wide
+
+# filebeat-config-check 使用固定官方镜像验证配置，并包含一个非法协议版本反例。
+filebeat-config-check:
+	@scripts/check-filebeat-config.sh
+
+# k8s-filebeat-render 渲染跨 stage3-collector/stage3-logs 的独立采集 overlay。
+k8s-filebeat-render:
+	@$(KUBECTL) kustomize $(KUSTOMIZE_FILEBEAT_OVERLAY)
+
+# k8s-filebeat-validate 精确校验资源、RBAC、挂载、安全上下文和服务端准入，不写集群。
+k8s-filebeat-validate: k8s-context-check
+	@scripts/run-filebeat-deployment.sh validate
+
+# k8s-filebeat-image-check 在部署前读取节点实际 manifest/config 摘要。
+k8s-filebeat-image-check: k8s-context-check
+	@scripts/verify-filebeat-image.sh node
+
+# k8s-filebeat-runtime-check 核对全部 DaemonSet Pod 的运行时 imageID。
+k8s-filebeat-runtime-check: k8s-context-check
+	@scripts/verify-filebeat-image.sh pod
+
+# k8s-filebeat-deploy 使用自包含 runner 执行写前门禁、部署和运行后验证。
+k8s-filebeat-deploy: k8s-filebeat-validate
+	@scripts/run-filebeat-deployment.sh run
+
+k8s-filebeat-status:
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		get daemonsets,pods,configmaps,serviceaccounts \
+		-n $(FILEBEAT_NAMESPACE) \
+		-l distributed-log-platform.io/purpose=log-collection \
+		-o wide
+
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		get roles,rolebindings \
+		-n $(KUBE_NAMESPACE) \
+		-l distributed-log-platform.io/purpose=log-collection \
+		-o wide
+
+# k8s-filebeat-acceptance 复用固定批次 Job，并按 Kafka 有界位点验证采集、元数据和路由。
+k8s-filebeat-acceptance: export ACCEPTANCE_RUN_ID := $(ACCEPTANCE_RUN_ID)
+k8s-filebeat-acceptance: k8s-context-check k8s-filebeat-runtime-check
+	@scripts/run-filebeat-acceptance.sh
+
+# k8s-filebeat-fallback-acceptance 注入一条无 API 元数据的临时节点日志并验证未分类兜底。
+k8s-filebeat-fallback-acceptance: k8s-context-check k8s-filebeat-runtime-check
+	@scripts/run-filebeat-fallback-acceptance.sh
+
+# k8s-filebeat-registry-recovery 重建采集器 Pod，证明宿主 registry 防止旧批次回放且新批次仍可到达。
+k8s-filebeat-registry-recovery: k8s-context-check k8s-filebeat-runtime-check
+	@scripts/run-filebeat-registry-recovery.sh
 
 # k8s-acceptance-render 只渲染两个一次性 Job；批次 ID 必须由运行入口注入。
 k8s-acceptance-render:

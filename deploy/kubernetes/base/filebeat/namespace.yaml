@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stage3-collector
+  labels:
+    app.kubernetes.io/part-of: distributed-log-platform
+    distributed-log-platform.io/purpose: log-collection
+    # hostPath 不符合 Baseline/Restricted；只放节点采集器，不降低应用命名空间。
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35
