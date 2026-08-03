@@ -44,6 +44,7 @@ fi
 
 # 兜底 fixture 与固定名 Job、采集器重建共享互斥边界。
 source "${repo_root}/scripts/lib/filebeat-workflow-lock.sh"
+source "${repo_root}/scripts/lib/filebeat-kafka-evidence.sh"
 acquire_filebeat_workflow_lock || exit 1
 export FILEBEAT_WORKFLOW_LOCK_INHERITED=1
 
@@ -99,15 +100,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-kafka_exec() {
-  "${KUBECTL}" --context="${KUBE_CONTEXT}" exec "${KAFKA_POD}" \
-    -n "${KUBE_NAMESPACE}" -c "${KAFKA_CONTAINER}" -- \
-    env "KAFKA_HEAP_OPTS=-Xms32m -Xmx128m" "KAFKA_GC_LOG_OPTS=-Xlog:gc=off" "$@"
-}
-
 get_end_offset() {
   local output line prefix offset
-  output="$(kafka_exec /opt/kafka/bin/kafka-get-offsets.sh \
+  output="$(filebeat_kafka_exec /opt/kafka/bin/kafka-get-offsets.sh \
     --bootstrap-server localhost:9092 --topic "${TOPIC}")"
   prefix="${TOPIC}:${PARTITION}:"
   line="$(printf '%s\n' "${output}" | grep -F "${prefix}" || true)"
@@ -123,19 +118,8 @@ consume_to_end() {
   ((end >= cursor)) || fail "${TOPIC} 高水位倒退：${cursor} -> ${end}"
   count=$((end - cursor))
   if ((count > 0)); then
-    kafka_exec /opt/kafka/bin/kafka-console-consumer.sh \
-      --bootstrap-server localhost:9092 \
-      --topic "${TOPIC}" \
-      --partition "${PARTITION}" \
-      --offset "${cursor}" \
-      --max-messages "${count}" \
-      --timeout-ms 15000 \
-      --command-property enable.auto.commit=false \
-      --formatter-property print.partition=true \
-      --formatter-property print.offset=true \
-      --formatter-property print.key=true \
-      --formatter-property print.value=true \
-      >>"${capture_file}"
+    filebeat_consume_partition_range \
+      "${TOPIC}" "${PARTITION}" "${cursor}" "${count}" "${capture_file}"
     cursor="${end}"
   fi
 }

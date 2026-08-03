@@ -260,11 +260,17 @@ Kubernetes 元数据、主题隔离和物理重复。兜底入口只在 Minikube
 make k8s-filebeat-acceptance
 make k8s-filebeat-fallback-acceptance
 make k8s-filebeat-registry-recovery
+make k8s-filebeat-kafka-outage-recovery
 ```
 
-三个入口均已通过。`k8s-filebeat-registry-recovery` 是有写操作的恢复验收：它会
+四个入口均已通过。`k8s-filebeat-registry-recovery` 是有写操作的恢复验收：它会
 先核对 DaemonSet owner 和 registry 身份，再精确删除当前 Filebeat Pod，证明旧
-批次不回放且独立新批次仍可到达；不要把它当作只读状态检查。
+批次不回放且独立新批次仍可到达。`k8s-filebeat-kafka-outage-recovery` 也是有写
+操作的恢复验收：它在共享锁内把已核对身份的单 Broker StatefulSet 从 1 副本缩为
+0，确认 Kafka 不可达后才生成 40 条唯一日志，再恢复为 1；退出陷阱会按原 UID
+恢复副本数，并验证同一 StatefulSet、PVC、Cluster ID、主题位点和 Filebeat
+实例。两个入口都不能当作只读状态检查。该结果只覆盖有界的本地单 Broker 短停，
+不代表多节点故障转移、无限中断或磁盘队列能力。
 
 查看两个真实日志源：
 
@@ -375,5 +381,7 @@ Topic ID、拓扑和配置仍保持。Filebeat 9.4.4 Wolfi 已以独立 DaemonSe
 通过。唯一批次的 api/worker 共 40 条逻辑事件已完成四主题有界位点对账，0 物理
 重复、无跨主题路由；元数据缺失 fixture 也已用稳定路径指纹进入
 `logs.unclassified`。Filebeat Pod 重建后，宿主 registry 与 Beat UUID 保持，旧
-批次 0 回放且新批次 40/40 到达。Kafka 中断恢复和 Kafka 消息持久化恢复仍待独立
-验证。
+批次 0 回放且新批次 40/40 到达。受控地把单 Broker 从 1 副本缩为 0 后，在 Pod
+缺席窗口产生的 40 条日志已于恢复后全部进入正确主题，0 条物理重复；StatefulSet
+UID、PVC UID/PV 和 Cluster ID 保持，故障前位点连续可读并在恢复后继续推进。该
+证据不外推为多节点高可用、任意长中断、队列容量或磁盘损坏恢复保证。

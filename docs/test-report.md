@@ -524,9 +524,67 @@ first_start=2026-08-03T06:01:58.696671607Z
 出现 0 次；窗口结束时 pre Job/Pod UID 未变，节点源日志仍包含完整 pre run-id。
 恢复专用 Job 最后按 UID、用途和 run-id 三重匹配后前台删除，没有残留。
 
+### Kafka 单 Broker 短时停止后的积压恢复
+
+入口为 `make k8s-filebeat-kafka-outage-recovery`，通过统一 Filebeat 工作流锁与其他
+部署、验收和恢复操作互斥。验收最终采用 Kafka StatefulSet 受控缩容 1→0→1，
+而不是 NetworkPolicy：预实验确认 Kindnet 能阻止新连接，但既有 Kafka TCP 连接
+仍可继续使用，因此脚本在位点未稳定时拒绝创建日志 Job，恢复策略并完成清理；
+这种证据不足以声明严格故障窗口。
+
+最终批次为
+`uc001-kafka-outage-2a0e9228f79e484f904c609d0c7affbe`。任何写操作前，脚本核对
+Kafka StatefulSet UID、generation、revision、原副本数、Retain 策略，Kafka Pod
+owner、镜像、0 重启，PVC UID/PV、`meta.properties` 摘要和 Broker Cluster ID，
+同时记录四个主题的全部分区位点。Filebeat Pod 必须 Ready、0 重启、运行时镜像
+正确，Kafka/Filebeat Kustomize diff 必须为空。关键初始身份如下：
+
+```text
+Kafka StatefulSet UID=f7d599d7-f2ab-489f-bf69-4ec539f12cf1
+Kafka 原 Pod UID=a239ea77-f954-49b4-8d16-3a5b3cb8f981
+Filebeat Pod UID=a7d3ee84-760c-4607-8c55-e8b9e9fa094b
+PVC UID=6bc802f0-4c09-478c-bf7d-a61dcb25dd13
+PV=pvc-6bc802f0-4c09-478c-bf7d-a61dcb25dd13
+Cluster ID=7KrkiFZsTlGTY-F1HBdr9Q
+meta.properties SHA-256=66c665545ba66b5ede82ad0fed60f681a51c67b23ff632b7267e674493632eb6
+```
+
+缩容使用带 `metadata.uid` 和原 `spec.replicas` 两个 `test` 条件的 JSON Patch，
+`EXIT` 陷阱在任何后续失败时都按原 StatefulSet UID 尝试恢复副本数。只有在
+StatefulSet 状态为 0/0/0、`kafka-0` 已不存在且 Filebeat output 输出明确包含
+解析成功、DNS 成功和拨号失败时，脚本才创建两个各 20 条的唯一 Job。Filebeat
+9.4.4 在连接拒绝时会打印 `ERROR` 却返回原始退出码 0，因此门禁校验命令的语义
+输出，而不把退出码 0 误判成可达；正常连接正例仍必须同时通过。
+
+故障窗口内两个 Job 各输出 20 行合法 JSON。恢复 Kafka 前，脚本从同一 Filebeat
+Pod 的唯一 Filebeat 进程读取 `/proc`，确认两份精确 CRI 文件都已读到 EOF：
+
+```text
+api-service:    pid=7 fd=11 position=4955 size=4955
+worker-service: pid=7 fd=10 position=5015 size=5015
+outage_confirmed_at=2026-08-03T09:01:38Z
+jobs_completed_at=2026-08-03T09:01:44Z
+restore_started_at=2026-08-03T09:01:46Z
+已确认不可用窗口=8 秒
+```
+
+恢复后 Kafka 新 Pod UID 为 `2312bde8-ee5b-48f4-9252-c72fb43e666f`，Ready、0
+重启；StatefulSet UID/revision、PVC UID/PV、运行时镜像、`meta.properties`
+摘要与 Cluster ID 均保持。Filebeat Pod UID、容器身份和 0 重启也保持。恢复完成
+时间为 `2026-08-03T09:02:53Z`，从开始恢复到完整对账用时 67 秒。
+
+校验器从故障前位点到恢复后高水位消费四个主题，并以精确 run-id 过滤同时运行的
+持续日志：40 条逻辑事件、40 条物理记录、0 条逐字节相同重复、0 缺失、0 错误
+路由；`logs.unclassified` 和 `logs.dlq` 没有本批事件。继续稳定观察 20 秒后结果
+不变。两个 Job 最后按 UID、用途和 run-id 三重匹配删除，集群中没有故障验收
+残留，Kafka/Filebeat overlay diff 仍为空。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
 分区键、Kubernetes 元数据、原始消息保持、缺少元数据时的稳定兜底以及 Filebeat
-Pod 重建后的 registry 连续性。它尚未证明 Kafka 短时中断后的积压恢复、Kafka
-消息在 Broker Pod 重建后的保留，也不代表多节点高可用、TLS/SASL 或生产容量。
+Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的有界故障窗口内，
+同一 PVC 上故障前位点连续可读并继续推进，新产生的 40 条日志恢复后完整投递。
+它不代表多节点故障转移、任意长中断、队列饱和、节点磁盘丢失、TLS/SASL 或
+生产容量，也尚未覆盖
+`log-processor`、Elasticsearch 与 Grafana 的后半段链路。

@@ -52,6 +52,7 @@ done
 
 # 恢复测试跨越固定名基准 Job、独立恢复 Job 和采集器重建，整个窗口只允许一个流程。
 source "${repo_root}/scripts/lib/filebeat-workflow-lock.sh"
+source "${repo_root}/scripts/lib/filebeat-kafka-evidence.sh"
 acquire_filebeat_workflow_lock || exit 1
 export FILEBEAT_WORKFLOW_LOCK_INHERITED=1
 
@@ -131,45 +132,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-kafka_exec() {
-  "${KUBECTL}" --context="${KUBE_CONTEXT}" exec "${KAFKA_POD}" \
-    -n "${KUBE_NAMESPACE}" -c "${KAFKA_CONTAINER}" -- \
-    env "KAFKA_HEAP_OPTS=-Xms32m -Xmx128m" "KAFKA_GC_LOG_OPTS=-Xlog:gc=off" "$@"
-}
-
-get_offset() {
-  local offset_file="$1"
-  local topic="$2"
-  local partition="$3"
-  local prefix="${topic}:${partition}:"
-  local matches=()
-  local offset
-
-  mapfile -t matches < <(grep -F "${prefix}" "${offset_file}" || true)
-  [[ "${#matches[@]}" -eq 1 && "${matches[0]}" == "${prefix}"* ]] ||
-    fail "主题 ${topic} 分区 ${partition} 位点缺失或重复"
-  offset="${matches[0]#${prefix}}"
-  [[ "${offset}" =~ ^[0-9]+$ ]] || fail "主题 ${topic} 分区 ${partition} 位点非法：${offset}"
-  printf '%s' "${offset}"
-}
-
-capture_offsets() {
-  local topic="$1"
-  local expected_partitions="$2"
-  local output_file="$3"
-  local matching_count partition
-
-  kafka_exec /opt/kafka/bin/kafka-get-offsets.sh \
-    --bootstrap-server localhost:9092 \
-    --topic "${topic}" >"${output_file}"
-  matching_count="$(grep -Fc "${topic}:" "${output_file}" || true)"
-  [[ "${matching_count}" -eq "${expected_partitions}" ]] ||
-    fail "主题 ${topic} 位点清单异常：实际 ${matching_count} 个分区，要求 ${expected_partitions}"
-  for ((partition = 0; partition < expected_partitions; partition += 1)); do
-    get_offset "${output_file}" "${topic}" "${partition}" >/dev/null
-  done
-}
-
 # 每轮只读取游标到已锁定高水位的精确记录数；超出上限视为可能发生大规模回放。
 capture_recovery_window() {
   local topic_index topic expected_partitions partition key cursor end count
@@ -177,29 +139,18 @@ capture_recovery_window() {
   for topic_index in "${!TOPICS[@]}"; do
     topic="${TOPICS[topic_index]}"
     expected_partitions="${TOPIC_PARTITIONS[topic_index]}"
-    capture_offsets "${topic}" "${expected_partitions}" "${end_files[topic_index]}"
+    filebeat_capture_offsets "${topic}" "${expected_partitions}" "${end_files[topic_index]}"
     for ((partition = 0; partition < expected_partitions; partition += 1)); do
       key="${topic}|${partition}"
       cursor="${cursors[${key}]}"
-      end="$(get_offset "${end_files[topic_index]}" "${topic}" "${partition}")"
+      end="$(filebeat_get_offset "${end_files[topic_index]}" "${topic}" "${partition}")"
       ((end >= cursor)) || fail "主题 ${topic} 分区 ${partition} 高水位倒退：${cursor} -> ${end}"
       count=$((end - cursor))
       ((count <= FILEBEAT_ACCEPTANCE_MAX_RECORDS)) ||
         fail "主题 ${topic} 分区 ${partition} 恢复窗口新增 ${count} 条，超过安全上限 ${FILEBEAT_ACCEPTANCE_MAX_RECORDS}"
       if ((count > 0)); then
-        kafka_exec /opt/kafka/bin/kafka-console-consumer.sh \
-          --bootstrap-server localhost:9092 \
-          --topic "${topic}" \
-          --partition "${partition}" \
-          --offset "${cursor}" \
-          --max-messages "${count}" \
-          --timeout-ms 15000 \
-          --command-property enable.auto.commit=false \
-          --formatter-property print.partition=true \
-          --formatter-property print.offset=true \
-          --formatter-property print.key=true \
-          --formatter-property print.value=true \
-          >>"${capture_files[topic_index]}"
+        filebeat_consume_partition_range \
+          "${topic}" "${partition}" "${cursor}" "${count}" "${capture_files[topic_index]}"
       fi
       cursors["${key}"]="${end}"
     done
@@ -478,10 +429,10 @@ for topic_index in "${!TOPICS[@]}"; do
   end_files[topic_index]="${work_dir}/end-${topic_index}.txt"
   capture_files[topic_index]="${work_dir}/capture-${topic_index}.txt"
   : >"${capture_files[topic_index]}"
-  capture_offsets "${TOPICS[topic_index]}" "${TOPIC_PARTITIONS[topic_index]}" "${start_files[topic_index]}"
+  filebeat_capture_offsets "${TOPICS[topic_index]}" "${TOPIC_PARTITIONS[topic_index]}" "${start_files[topic_index]}"
   for ((partition = 0; partition < TOPIC_PARTITIONS[topic_index]; partition += 1)); do
     cursors["${TOPICS[topic_index]}|${partition}"]="$(
-      get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}"
+      filebeat_get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}"
     )"
   done
 done
@@ -560,7 +511,7 @@ assert_pre_evidence_retained
 
 for topic_index in "${!TOPICS[@]}"; do
   for ((partition = 0; partition < TOPIC_PARTITIONS[topic_index]; partition += 1)); do
-    start="$(get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}")"
+    start="$(filebeat_get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}")"
     end="${cursors["${TOPICS[topic_index]}|${partition}"]}"
     echo "RECOVERY_RANGE topic=${TOPICS[topic_index]} partition=${partition} start=${start} end=${end}"
   done
