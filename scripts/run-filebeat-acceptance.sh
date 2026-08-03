@@ -55,6 +55,7 @@ export ACCEPTANCE_RUN_ID
 
 # 固定名 Job、节点 fixture 和采集器重建共享同一把锁，避免证据窗口被并发流程改写。
 source "${repo_root}/scripts/lib/filebeat-workflow-lock.sh"
+source "${repo_root}/scripts/lib/filebeat-kafka-evidence.sh"
 acquire_filebeat_workflow_lock || exit 1
 export FILEBEAT_WORKFLOW_LOCK_INHERITED=1
 
@@ -89,48 +90,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-kafka_exec() {
-  "${KUBECTL}" --context="${KUBE_CONTEXT}" exec "${KAFKA_POD}" \
-    -n "${KUBE_NAMESPACE}" -c "${KAFKA_CONTAINER}" -- \
-    env "KAFKA_HEAP_OPTS=-Xms32m -Xmx128m" "KAFKA_GC_LOG_OPTS=-Xlog:gc=off" "$@"
-}
-
-capture_offsets() {
-  local topic="$1"
-  local expected_partitions="$2"
-  local output_file="$3"
-  local matching_count
-
-  kafka_exec /opt/kafka/bin/kafka-get-offsets.sh \
-    --bootstrap-server localhost:9092 \
-    --topic "${topic}" >"${output_file}"
-
-  matching_count="$(grep -Fc "${topic}:" "${output_file}" || true)"
-  [[ "${matching_count}" -eq "${expected_partitions}" ]] ||
-    fail "主题 ${topic} 位点清单异常：实际 ${matching_count} 个分区，要求 ${expected_partitions}"
-
-  local partition
-  for ((partition = 0; partition < expected_partitions; partition += 1)); do
-    get_offset "${output_file}" "${topic}" "${partition}" >/dev/null
-  done
-}
-
-get_offset() {
-  local offset_file="$1"
-  local topic="$2"
-  local partition="$3"
-  local prefix="${topic}:${partition}:"
-  local matches=()
-  local offset
-
-  mapfile -t matches < <(grep -F "${prefix}" "${offset_file}" || true)
-  [[ "${#matches[@]}" -eq 1 && "${matches[0]}" == "${prefix}"* ]] ||
-    fail "主题 ${topic} 分区 ${partition} 位点缺失或重复"
-  offset="${matches[0]#${prefix}}"
-  [[ "${offset}" =~ ^[0-9]+$ ]] || fail "主题 ${topic} 分区 ${partition} 位点非法：${offset}"
-  printf '%s' "${offset}"
-}
-
 # 每轮只消费上次游标到当前高水位，既不依赖消费者组，也不反复读取历史窗口。
 consume_new_records() {
   local topic_index topic expected_partitions partition key cursor end count
@@ -138,12 +97,12 @@ consume_new_records() {
   for topic_index in "${!TOPICS[@]}"; do
     topic="${TOPICS[topic_index]}"
     expected_partitions="${TOPIC_PARTITIONS[topic_index]}"
-    capture_offsets "${topic}" "${expected_partitions}" "${end_files[topic_index]}"
+    filebeat_capture_offsets "${topic}" "${expected_partitions}" "${end_files[topic_index]}"
 
     for ((partition = 0; partition < expected_partitions; partition += 1)); do
       key="${topic}|${partition}"
       cursor="${cursors[${key}]}"
-      end="$(get_offset "${end_files[topic_index]}" "${topic}" "${partition}")"
+      end="$(filebeat_get_offset "${end_files[topic_index]}" "${topic}" "${partition}")"
       ((end >= cursor)) || fail "主题 ${topic} 分区 ${partition} 高水位倒退：${cursor} -> ${end}"
       count=$((end - cursor))
       ((count <= FILEBEAT_ACCEPTANCE_MAX_RECORDS)) ||
@@ -152,19 +111,8 @@ consume_new_records() {
         continue
       fi
 
-      kafka_exec /opt/kafka/bin/kafka-console-consumer.sh \
-        --bootstrap-server localhost:9092 \
-        --topic "${topic}" \
-        --partition "${partition}" \
-        --offset "${cursor}" \
-        --max-messages "${count}" \
-        --timeout-ms 15000 \
-        --command-property enable.auto.commit=false \
-        --formatter-property print.partition=true \
-        --formatter-property print.offset=true \
-        --formatter-property print.key=true \
-        --formatter-property print.value=true \
-        >>"${capture_files[topic_index]}"
+      filebeat_consume_partition_range \
+        "${topic}" "${partition}" "${cursor}" "${count}" "${capture_files[topic_index]}"
       cursors["${key}"]="${end}"
     done
   done
@@ -199,11 +147,11 @@ for topic_index in "${!TOPICS[@]}"; do
   end_files[topic_index]="${work_dir}/end-${topic_index}.txt"
   capture_files[topic_index]="${work_dir}/capture-${topic_index}.txt"
   : >"${capture_files[topic_index]}"
-  capture_offsets "${TOPICS[topic_index]}" "${TOPIC_PARTITIONS[topic_index]}" "${start_files[topic_index]}"
+  filebeat_capture_offsets "${TOPICS[topic_index]}" "${TOPIC_PARTITIONS[topic_index]}" "${start_files[topic_index]}"
 
   for ((partition = 0; partition < TOPIC_PARTITIONS[topic_index]; partition += 1)); do
     cursors["${TOPICS[topic_index]}|${partition}"]="$(
-      get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}"
+      filebeat_get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}"
     )"
   done
 done
@@ -259,7 +207,7 @@ fi
 cat "${validator_stdout}"
 for topic_index in "${!TOPICS[@]}"; do
   for ((partition = 0; partition < TOPIC_PARTITIONS[topic_index]; partition += 1)); do
-    start="$(get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}")"
+    start="$(filebeat_get_offset "${start_files[topic_index]}" "${TOPICS[topic_index]}" "${partition}")"
     key="${TOPICS[topic_index]}|${partition}"
     end="${cursors[${key}]}"
     echo "KAFKA_RANGE topic=${TOPICS[topic_index]} partition=${partition} start=${start} end=${end}"

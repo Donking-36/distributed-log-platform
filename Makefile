@@ -31,6 +31,9 @@ FILEBEAT_ACCEPTANCE_MAX_RECORDS ?= 5000
 FILEBEAT_FALLBACK_TIMEOUT ?= 120s
 FILEBEAT_RECOVERY_TIMEOUT ?= 180s
 FILEBEAT_RECOVERY_SETTLE_SECONDS ?= 20
+FILEBEAT_OUTAGE_TIMEOUT ?= 300s
+FILEBEAT_OUTAGE_SETTLE_SECONDS ?= 20
+FILEBEAT_OUTAGE_PROBE_TIMEOUT ?= 45s
 FILEBEAT_VERSION ?= 9.4.4
 FILEBEAT_LOCAL_IMAGE ?= docker.elastic.co/beats/filebeat-wolfi:9.4.4
 
@@ -53,6 +56,7 @@ export KUSTOMIZE_KAFKA_TOPICS_OVERLAY KAFKA_TOPIC_INIT_TIMEOUT
 export DOCKER KUSTOMIZE_FILEBEAT_OVERLAY FILEBEAT_NAMESPACE FILEBEAT_ROLLOUT_TIMEOUT FILEBEAT_LOCAL_IMAGE
 export FILEBEAT_ACCEPTANCE_TIMEOUT FILEBEAT_ACCEPTANCE_SETTLE_SECONDS FILEBEAT_ACCEPTANCE_MAX_RECORDS FILEBEAT_VERSION
 export FILEBEAT_FALLBACK_TIMEOUT FILEBEAT_RECOVERY_TIMEOUT FILEBEAT_RECOVERY_SETTLE_SECONDS
+export FILEBEAT_OUTAGE_TIMEOUT FILEBEAT_OUTAGE_SETTLE_SECONDS FILEBEAT_OUTAGE_PROBE_TIMEOUT
 export FILEBEAT_NODE_IMAGE EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST
 export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
 
@@ -62,7 +66,7 @@ export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
 	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test \
 	filebeat-config-check k8s-filebeat-render k8s-filebeat-validate k8s-filebeat-image-check \
 	k8s-filebeat-runtime-check k8s-filebeat-deploy k8s-filebeat-status k8s-filebeat-acceptance \
-	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery
+	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery k8s-filebeat-kafka-outage-recovery
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
 check: version-check fmt-check shell-check filebeat-validator-test vet test build kafka-topic-initializer-test
@@ -291,6 +295,10 @@ k8s-filebeat-fallback-acceptance: k8s-context-check k8s-filebeat-runtime-check
 # k8s-filebeat-registry-recovery 重建采集器 Pod，证明宿主 registry 防止旧批次回放且新批次仍可到达。
 k8s-filebeat-registry-recovery: k8s-context-check k8s-filebeat-runtime-check
 	@scripts/run-filebeat-registry-recovery.sh
+
+# k8s-filebeat-kafka-outage-recovery 临时缩容单 Broker，证明有界短停窗口内的积压会在恢复后补投。
+k8s-filebeat-kafka-outage-recovery: k8s-context-check k8s-kafka-runtime-check k8s-filebeat-runtime-check
+	@scripts/run-filebeat-kafka-outage-recovery.sh
 
 # k8s-acceptance-render 只渲染两个一次性 Job；批次 ID 必须由运行入口注入。
 k8s-acceptance-render:

@@ -1,6 +1,6 @@
 # 架构
 
-- 状态：UC-001A 已验证基线
+- 状态：UC-001A 采集、路由、registry 与有界单 Broker 短停恢复已验证
 - 更新日期：2026-08-03
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
@@ -147,6 +147,12 @@ UC-001/UC-002 验收链路全绿之后。
   进程退出由 kubelet 重启，Kafka 投递能力由 Pod 内 output 检查和端到端消息验收
   证明。
 
+Filebeat registry 只记录文件读取进度和采集身份，不保存业务事件正文，也不能被
+描述为磁盘队列。当前配置没有显式启用磁盘队列；已验证的是一个有界场景：Kafka
+Pod 缺席时，同一 Filebeat 进程把两份精确 CRI 日志读到 EOF，源文件保持可读，
+Broker 恢复后 40 条逻辑事件全部进入正确主题。该证据不能外推到任意长中断、
+队列饱和或节点磁盘丢失。
+
 完整技术栈必须在外层 4 CPU、6 GiB 限制内保留余量。`log-producer` 本地
 开发基线已通过部署冒烟：每个 Pod 请求 10m CPU/16 MiB 内存，上限为
 100m CPU/64 MiB 内存；一次稳定运行快照中 cgroup `memory.current` 约为
@@ -249,8 +255,8 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | Minikube | 本地已验证：1.38.1 | `minikube version` / 配置实例证据 |
 | Kubernetes | 集群已验证：v1.35.1 | `stage3-logs` 节点为 Ready |
 | containerd | 集群已验证：2.2.1 | 节点运行时输出 |
-| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、Broker/初始化 Job 运行时 imageID、主题初始化幂等性、同一 PVC 上的主题元数据恢复及 Filebeat 集群内生产/消费通过；消息恢复尚未验证 |
-| Filebeat 镜像 | 已验证：`docker.elastic.co/beats/filebeat-wolfi:9.4.4@sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca` | 上游 linux/amd64 manifest `sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379`；节点转换后 manifest/config 为 `sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9` / `sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf`；Kafka 客户端协议固定为 Filebeat 支持的 `4.1.0` 并连接 Kafka 4.3.1；配置、运行时 imageID、正常路由和元数据失效兜底均通过 |
+| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、Broker/初始化 Job 运行时 imageID、主题初始化幂等性、同一 PVC 上的主题元数据恢复及 Filebeat 集群内生产/消费通过；受控 1→0→1 短停后 StatefulSet、PVC 和 Cluster ID 保持，故障前位点连续可读并继续推进，故障窗口内 40 条日志恢复完成；不代表多节点高可用或无限中断 |
+| Filebeat 镜像 | 已验证：`docker.elastic.co/beats/filebeat-wolfi:9.4.4@sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca` | 上游 linux/amd64 manifest `sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379`；节点转换后 manifest/config 为 `sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9` / `sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf`；Kafka 客户端协议固定为 Filebeat 支持的 `4.1.0` 并连接 Kafka 4.3.1；配置、运行时 imageID、正常/兜底路由、registry Pod 重建和有界 Kafka 短停恢复门禁均通过 |
 | Elasticsearch 镜像 | 待定 | 健康、模板、索引和查询冒烟测试通过后固定镜像标签和摘要 |
 | Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
 | Go Kafka 客户端 | 待定 | 仅在 Kafka 协议冒烟测试通过后选定，并记录理由 |
@@ -291,8 +297,9 @@ digest。
    完整链路后续继续验证数据最终可在 Grafana 中查看。
 5. 恢复：Kafka Broker Pod 替换后 Topic ID/拓扑/配置保持；Filebeat Pod 重建时
    registry 目录、`meta.json` 身份和 Beat UUID 保持，旧批次不回放且新批次完整
-   到达。后续再验证 `log-processor` 重启、演示 Pod 替换和有界的 Kafka 不可用
-   故障。
+   到达。单 Kafka Broker 受控缩容 1→0→1 时，同一 StatefulSet、PVC 和 Cluster ID
+   保持，Pod 缺席窗口产生的 40 条逻辑事件恢复后全部正确路由，0 条物理重复。
+   后续再验证 `log-processor` 重启、演示 Pod 替换、多节点故障转移和更长故障窗口。
 6. 性能：声明事件大小、速率和持续时间，并记录 p50/p95/p99、错误率和
    唯一文档数。
 
