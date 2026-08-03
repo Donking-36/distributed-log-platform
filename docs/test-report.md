@@ -79,3 +79,92 @@ Go 包语句覆盖率为 `91.0%`。反向用例确认校验器会拒绝 19 行�
 - Job stdout 的“精确 20 行”不等同于后续 Kafka 至少一次投递的物理消息数量；
   Kafka 阶段必须按唯一序号和 `test_run_id` 单独验收。
 - 原始日志只用于本次校验，不提交仓库；报告保存可重复命令、摘要和校验和。
+
+## Kafka 4.3.1：单节点兼容性冒烟
+
+- 日期：2026-08-03
+- Docker：29.6.2，linux/amd64
+- Kafka：4.3.1，官方 JVM 镜像
+- 多架构索引摘要：`sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837`
+- linux/amd64 清单与本地 imageID：`sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`
+
+### 验收范围
+
+本次在宿主 Docker 中验证官方 Kafka 镜像的单节点 combined KRaft 启动、主题
+管理、带键消息生产和消费，以及当前资源包络。它不验证 Kubernetes 监听器、
+持久化、TLS/SASL、Filebeat、故障恢复或高可用。
+
+### 镜像与运行边界
+
+镜像来自 Apache 官方下载页指向的 `apache/kafka:4.3.1`，实际按 amd64 清单
+摘要拉取。容器使用非 root `appuser`，内置 OpenJDK 21.0.11。临时容器
+`stage3-kafka-compat` 带项目用途标签，限制为 1 CPU、1.5 GiB 内存、相同
+memory-swap 和 512 个 PID，不映射宿主端口、不配置自动重启。
+
+Broker API 就绪检查成功。KRaft 状态显示：
+
+```text
+ClusterId: 5L6g3nShT-eMCtK--X86sw
+LeaderId: 1
+MaxFollowerLag: 0
+CurrentVoters: [{"id": 1, "endpoints": ["CONTROLLER://localhost:9093"]}]
+```
+
+一次稳定资源快照为：
+
+```text
+CPU 1.23%
+内存 543.8 MiB / 1.5 GiB（35.40%）
+PID 103
+```
+
+该快照不是峰值，也不直接作为 Kubernetes 最终资源配置。
+
+### 主题与消息结果
+
+按架构基线成功创建并 describe：
+
+| 主题 | 分区 | 复制因子 |
+|---|---:|---:|
+| `logs.api-service` | 3 | 1 |
+| `logs.worker-service` | 3 | 1 |
+| `logs.unclassified` | 1 | 1 |
+| `logs.dlq` | 1 | 1 |
+
+使用批次 `kafka-compat-20260803-01` 向两个业务主题各写入两条 JSON。分别从头
+消费后，消息数量、`service.name`、共享 `test_run_id` 和 `event.sequence` `1..2`
+均自动校验通过；分区位点复核随后发现首条键的编码异常。
+
+第一次从 PowerShell 向 Linux CLI 传输消息时，输入流首行带 UTF-8 BOM，使
+第一条键实际变成 `﻿pod-worker-uid`，两条看似同键的消息因此落入不同分区。
+这不是 Kafka 分区器错误。修正验证改为在 WSL 内直接运行真实 `log-producer`，
+使用当前 CLI 参数 `--reader-property` 与 `--formatter-property`，并通过
+`--command-property` 显式设置 `acks=all` 和 `partitioner.ignore.keys=false`，
+结果为：
+
+```text
+messages=3
+key=pod-worker-uid
+partition=0
+values=identical
+```
+
+三条消息使用同一键、同一分区，消费值与 `log-producer` 原始输出逐字一致，
+`event.sequence` 为 `1..3`。
+
+### 关闭与清理
+
+Broker 日志没有 ERROR/FATAL，`OOMKilled=false`。Docker 发送 SIGTERM 后容器
+退出码为 143；日志明确显示 Broker、Controller、LogManager 和 RaftClient 均
+完成 graceful shutdown，因此该退出码按信号终止语义记录，不误判为崩溃。
+
+用途标签复核后，临时容器和镜像声明产生的三个匿名卷均已精确删除；没有执行
+全局 prune，固定 Kafka 镜像继续保留在本机缓存中供后续 Kubernetes 使用。
+
+### 结论与未覆盖边界
+
+- Kafka 4.3.1 官方 JVM 镜像适用于本项目下一步的本地 Kubernetes 设计基线。
+- 当前只证明单节点 KRaft 和容器内 Admin/Producer/Consumer 闭环可用。
+- Filebeat 对 Kafka 4.3.1 的真实生产兼容性仍需在 Filebeat 版本选定后验证。
+- Kubernetes Service、advertised listener、持久存储、堆内存和保留期尚未验证。
+- combined KRaft 是开发形态，不代表生产级控制器隔离或高可用。
