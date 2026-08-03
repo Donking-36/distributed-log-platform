@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: kafka
+    app.kubernetes.io/component: message-broker
+    app.kubernetes.io/part-of: distributed-log-platform
+spec:
+  clusterIP: None
+  # 控制器启动前 Pod 尚未 Ready，仍需先解析自己的稳定 DNS。
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: kafka
+  ports:
+    # 元数据返回稳定 Pod DNS；客户端仍应先连接普通 kafka Service。
+    - name: client
+      protocol: TCP
+      port: 9092
+      targetPort: client
+    # 控制器端口只用于单节点 KRaft 自发现，不作为客户端入口。
+    - name: controller
+      protocol: TCP
+      port: 9093
+      targetPort: controller

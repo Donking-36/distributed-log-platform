@@ -3,6 +3,7 @@
 GO ?= go
 GOFMT ?= gofmt
 DOCKER ?= docker
+MINIKUBE ?= minikube
 PYTHON ?= python3
 KUBECTL ?= kubectl
 GO_VERSION := 1.26.5
@@ -14,11 +15,23 @@ KUBE_CONTEXT ?= stage3-logs
 KUBE_NAMESPACE ?= stage3-logs
 KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
 KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
+KUSTOMIZE_KAFKA_OVERLAY ?= deploy/kubernetes/overlays/local-kafka
 ACCEPTANCE_RUN_ID ?=
 ACCEPTANCE_TIMEOUT ?= 60s
+KAFKA_ROLLOUT_TIMEOUT ?= 300s
+
+# 这些值与 local-kafka overlay 构成同一镜像身份基线，更新时必须连同证据一起修改。
+override KAFKA_NODE_IMAGE := docker.io/apache/kafka:4.3.1
+override EXPECTED_KAFKA_MANIFEST_DIGEST := sha256:f8f865a3222d807cf1e6c515ca447cb2fb604ddc57f0a007a02a9ce79bd7a511
+override EXPECTED_KAFKA_CONFIG_DIGEST := sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11
+
+# 镜像校验脚本只读取显式导出的项目参数，不自行维护另一份摘要常量。
+export MINIKUBE KUBECTL KUBE_CONTEXT KUBE_NAMESPACE KAFKA_NODE_IMAGE
+export EXPECTED_KAFKA_MANIFEST_DIGEST EXPECTED_KAFKA_CONFIG_DIGEST
 
 .PHONY: check version-check fmt fmt-check vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
-	k8s-acceptance-render k8s-acceptance
+	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
+	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
 check: version-check fmt-check vet test build
@@ -120,6 +133,48 @@ k8s-status:
 		get deployments,pods \
 		-n $(KUBE_NAMESPACE) \
 		-l app.kubernetes.io/name=log-producer \
+		-o wide
+
+# k8s-kafka-render 只渲染独立的 Kafka overlay，不连接或修改集群。
+k8s-kafka-render:
+	@$(KUBECTL) kustomize $(KUSTOMIZE_KAFKA_OVERLAY)
+
+# k8s-kafka-validate 使用目标 API Server 校验 Kafka 清单，但不创建资源。
+k8s-kafka-validate: k8s-context-check
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		--dry-run=server \
+		-k $(KUSTOMIZE_KAFKA_OVERLAY)
+
+# k8s-kafka-image-check 在写集群前校验 Minikube 节点内标签实际指向的摘要。
+k8s-kafka-image-check: k8s-context-check
+	@scripts/verify-kafka-image.sh node
+
+# k8s-kafka-runtime-check 确认主容器和初始化容器都使用预期 config digest。
+k8s-kafka-runtime-check: k8s-context-check
+	@scripts/verify-kafka-image.sh pod
+
+# k8s-kafka-deploy 与应用部署解耦，并在应用前后分别验证镜像身份。
+k8s-kafka-deploy: k8s-kafka-validate k8s-kafka-image-check
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		-k $(KUSTOMIZE_KAFKA_OVERLAY)
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		rollout status \
+		statefulset/kafka \
+		-n $(KUBE_NAMESPACE) \
+		--timeout=$(KAFKA_ROLLOUT_TIMEOUT)
+	@scripts/verify-kafka-image.sh pod
+
+k8s-kafka-status:
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		get statefulsets,pods,services,persistentvolumeclaims \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=kafka \
 		-o wide
 
 # k8s-acceptance-render 只渲染两个一次性 Job；批次 ID 必须由运行入口注入。

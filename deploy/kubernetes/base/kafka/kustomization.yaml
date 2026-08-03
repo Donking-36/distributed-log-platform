@@ -1,0 +1,55 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - client-service.yaml
+  - headless-service.yaml
+  - statefulset.yaml
+
+configMapGenerator:
+  - name: kafka-runtime
+    literals:
+      # cluster ID 由固定 Kafka 4.3.1 镜像生成，必须与持久化数据保持一致。
+      - CLUSTER_ID=7KrkiFZsTlGTY-F1HBdr9Q
+      # 本地开发仅使用一个同时承担 Broker 和 Controller 的 KRaft 节点。
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_LOG_DIRS=/var/lib/kafka/data
+      # 官方脚本默认写 /opt/kafka/logs；改用可写临时卷，并把 GC 日志交给 stdout。
+      - LOG_DIR=/tmp/kafka-logs
+      - KAFKA_GC_LOG_OPTS=-Xlog:gc:stdout:time,tags
+      # 主题由受控初始化流程创建，未知服务不得通过自动建主题扩散命名空间。
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=false
+      - KAFKA_NUM_PARTITIONS=3
+      - KAFKA_DEFAULT_REPLICATION_FACTOR=1
+      - KAFKA_MIN_INSYNC_REPLICAS=1
+      # 单节点开发集群必须把内部主题的副本数和分区数收敛到可运行范围。
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS=3
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS=3
+      - KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR=1
+      - KAFKA_SHARE_COORDINATOR_STATE_TOPIC_NUM_PARTITIONS=3
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      # 这些值仅限制本地开发数据：最多保留 24 小时且每分区约 128 MiB。
+      - KAFKA_LOG_RETENTION_HOURS=24
+      - KAFKA_LOG_RETENTION_BYTES=134217728
+      - KAFKA_LOG_SEGMENT_BYTES=67108864
+      - KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS=300000
+      # 512 MiB 堆配合 1536 MiB 容器上限，为堆外内存和探针 CLI 留出余量。
+      - KAFKA_HEAP_OPTS=-Xms512m -Xmx512m
+
+generatorOptions:
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: kafka
+    app.kubernetes.io/component: message-broker
+    app.kubernetes.io/part-of: distributed-log-platform
+  # 配置内容变化时让 StatefulSet Pod 模板引用新名称并触发滚动更新。
+  disableNameSuffixHash: false

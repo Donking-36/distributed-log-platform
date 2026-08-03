@@ -1,0 +1,174 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: kafka
+    app.kubernetes.io/component: message-broker
+    app.kubernetes.io/part-of: distributed-log-platform
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  revisionHistoryLimit: 2
+  podManagementPolicy: OrderedReady
+  # 删除或缩容 StatefulSet 时保留 PVC，避免把状态清理隐藏在部署命令中。
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+      app.kubernetes.io/instance: kafka
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/instance: kafka
+        app.kubernetes.io/component: message-broker
+        app.kubernetes.io/part-of: distributed-log-platform
+    spec:
+      automountServiceAccountToken: false
+      # 避免 Service 自动注入 KAFKA_* 环境变量并被官方入口误识别为 Broker 配置。
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-config
+          # 预置镜像自带的 Log4j2 配置，避免官方格式化工具在生成最终配置前无日志配置可用。
+          image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              cp -R /opt/kafka/config/. /generated-config/
+              test -s /generated-config/server.properties
+              test -s /generated-config/log4j2.yaml
+              test -s /generated-config/tools-log4j2.yaml
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: generated-config
+              mountPath: /generated-config
+      containers:
+        - name: kafka
+          # Base 固定多架构索引；local overlay 统一替换主容器和初始化容器的本地标签。
+          image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: kafka-runtime
+          env:
+            # 动态身份留在工作负载层，base 不绑定具体命名空间。
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            # 后置环境变量可以引用前面已经解析的 Pod 身份。
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://$(POD_NAME).kafka-headless.$(POD_NAMESPACE).svc.cluster.local:9092
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@kafka-0.kafka-headless.$(POD_NAMESPACE).svc.cluster.local:9093
+          ports:
+            - name: client
+              containerPort: 9092
+              protocol: TCP
+            - name: controller
+              containerPort: 9093
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          # 启动探针执行 Kafka 协议命令，端口开放但 Broker API 未就绪时不会放行。
+          startupProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - export KAFKA_HEAP_OPTS='-Xms32m -Xmx64m'; exec /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - export KAFKA_HEAP_OPTS='-Xms32m -Xmx64m'; exec /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          # 存活探针只检查监听端口，避免周期性启动额外 JVM 放大资源压力。
+          livenessProbe:
+            tcpSocket:
+              port: client
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+            # 初始化容器先复制镜像默认配置，官方入口再原位生成最终配置。
+            - name: generated-config
+              mountPath: /opt/kafka/config
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: generated-config
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: kafka
+          app.kubernetes.io/instance: kafka
+          app.kubernetes.io/component: message-broker
+          app.kubernetes.io/part-of: distributed-log-platform
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        volumeMode: Filesystem
+        resources:
+          requests:
+            storage: 2Gi

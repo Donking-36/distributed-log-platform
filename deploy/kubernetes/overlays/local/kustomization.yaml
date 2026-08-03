@@ -4,7 +4,7 @@ kind: Kustomization
 namespace: stage3-logs
 
 resources:
-  - namespace.yaml
+  - ../../base/namespace
   - ../../base/log-producer
 
 # 本地 overlay 只使用已旁加载到 stage3-logs 的固定提交镜像。
