@@ -110,6 +110,10 @@ UC-001/UC-002 验收链路全绿之后。
   地址以避免单节点控制器启动前的解析死锁。
 - Kafka StatefulSet 使用固定 cluster ID、2 GiB `ReadWriteOnce` PVC 和 Retain
   删除/缩容策略。自动建主题关闭，主题初始化不耦合进 Broker 入口。
+- 项目主题由独立 `local-kafka-topics` overlay 的一次性 Job 初始化。该 overlay
+  只包含一个哈希 ConfigMap 和一个 Job，不包含 Broker、Service、Namespace 或
+  PVC；因此重新执行主题管理不会隐式滚动 Kafka。固定名 Job 由宿主 runner 在
+  校验用途标签和终态后精确重建，完成后保留最近证据。
 - `log-processor`：配置就绪/存活探针、资源请求/限制、优雅终止，并以非根
   用户运行。
 - `log-producer`：配置资源请求/限制、安全上下文和优雅终止。它没有 Service
@@ -121,6 +125,12 @@ UC-001/UC-002 验收链路全绿之后。
   镜像原始配置复制到配置卷，避免格式化 JVM 启动时缺少 Log4j2 配置；主容器
   随后生成最终配置。两者使用同一镜像身份，并关闭 Service 环境变量自动注入，
   避免 `KAFKA_*` 名称污染 Broker 配置。
+- 主题初始化 Job 与 Broker 共享固定 Kafka 镜像身份，但不共享生命周期、配置卷
+  或数据 PVC。Job 不需要 Kubernetes RBAC，关闭 ServiceAccount token 和
+  ServiceLinks，只挂载只读脚本和受限 `/tmp`，并使用 Restricted 安全上下文。
+  Job 请求 50m CPU/128 MiB、限制 500m CPU/384 MiB，CLI 堆为 32～128 MiB；
+  `activeDeadlineSeconds=180`、`backoffLimit=0`，宿主 runner 默认 300 秒超时用于
+  等待终态并收集诊断，而不是给 Job 延长执行时间。
 - Filebeat 只在 `stage3-collector` 挂载必要的宿主机日志路径和 `registry`
   路径，使用 `stage3-logs` 目标工作负载允许列表，并排除自身及基础设施日志。
 - Filebeat 可能需要 `hostPath` 访问和集群级只读元数据权限；这些权限不允许
@@ -151,10 +161,23 @@ Kafka 的 startup/readiness 探针执行 Broker API 命令；liveness 使用 TCP
 | `logs.unclassified` | 1 | 1 | 未知或缺失服务标签的固定兜底主题 |
 | `logs.dlq` | 1 | 1 | 永久无效事件和处理证据 |
 
-已知服务使用稳定的 Pod UID 作为分区键。未知标签不能创建任意主题名。当前
-Broker 的本地默认保留边界为 24 小时、每分区 128 MiB、单段 64 MiB；两种条件
-任一满足即可淘汰旧段。这些值只约束 2 GiB 开发 PVC，后续主题初始化必须确认
-主题继承值，不能外推为生产保留策略。
+已知服务使用稳定的 Pod UID 作为分区键。未知标签不能创建任意主题名。四个主题
+都显式设置 `cleanup.policy=delete`、`retention.ms=86400000`、
+`retention.bytes=134217728`、`segment.bytes=67108864` 和
+`min.insync.replicas=1`。时间或容量条件任一满足即可淘汰旧段；
+`retention.bytes` 是每分区限制。这些值只约束 2 GiB 开发 PVC，不能外推为生产
+保留策略。
+
+初始化采用“缺失则创建、存在则严格断言”。在任何创建前先检查全部已有主题；
+分区、副本、ISR、重分配状态或显式配置不一致均失败，不自动扩分区、执行副本
+重分配、修改保留期或删除主题。增加分区不可逆且会改变 keyed producer 的映射，
+缩短保留期还可能删除数据，因此不能把这些操作隐藏在幂等入口中。
+
+拓扑证据来自 `kafka-topics --describe`；显式配置证据来自 `kafka-configs`
+逐行输出的 `DYNAMIC_TOPIC_CONFIG`，且动态键集合必须恰好为上述五项。不能解析
+`kafka-topics` header 的 `Configs` 字段来证明 override：它会混入继承的有效值，
+配置值中的逗号也没有转义，例如合法的 `cleanup.policy=delete,compact` 会造成
+歧义。
 
 这些主题数量和兜底路径已由 ADR-001/ADR-002 接受。业务主题从创建时起即为
 多分区；消费者副本扩缩容实验本身仍然延期。
@@ -209,7 +232,7 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | Minikube | 本地已验证：1.38.1 | `minikube version` / 配置实例证据 |
 | Kubernetes | 集群已验证：v1.35.1 | `stage3-logs` 节点为 Ready |
 | containerd | 集群已验证：2.2.1 | 节点运行时输出 |
-| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、运行时 imageID，以及同一 PVC 上的 KRaft 元数据连续性通过；主题和消息恢复尚未验证 |
+| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、Broker/初始化 Job 运行时 imageID、主题初始化幂等性及同一 PVC 上的主题元数据恢复通过；集群内消息生产/消费和消息恢复尚未验证 |
 | Filebeat 镜像 | 待定 | 通过 Filebeat→Kafka 配置/输出检查，并保留必需的真实事件字段 |
 | Elasticsearch 镜像 | 待定 | 健康、模板、索引和查询冒烟测试通过后固定镜像标签和摘要 |
 | Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
@@ -234,18 +257,20 @@ combined KRaft 模式，镜像内为非 root `appuser` 和 OpenJDK 21.0.11。官
 `sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11`
 及全部 12 个 layer 摘要和大小一致；local overlay 使用固定 `4.3.1` 标签、
 `Never` 拉取策略和四个摘要注解。注解仅保存证据；部署前门禁通过节点内
-`ctr`/`crictl` 强制比较 manifest/config 摘要，滚动完成后再要求主容器 imageID
-等于该 config digest。
+`ctr`/`crictl` 强制比较 manifest/config 摘要，滚动或主题初始化完成后再要求
+Broker 主容器、Broker 初始化容器和主题初始化 Job 的 imageID 等于该 config
+digest。
 
 ## 9. 验证层次
 
-1. 静态/配置：Go 格式检查与 `vet`、Kustomize 构建、Filebeat 配置/输出检查、
-   Grafana 自动配置验证。
+1. 静态/配置：Go 格式检查与 `vet`、Kustomize 构建、一次性 Job 资源边界与
+   服务端准入、Filebeat 配置/输出检查、Grafana 自动配置验证。
 2. 单元：解析、必填字段、级别规范化、确定性 ID 和重试分类。
 3. 集成：一条 Kafka 记录对应一个 Elasticsearch 文档；重复输入仍只产生
    一份唯一文档。
 4. 端到端：两个演示服务使用固定 `test_run_id`，数据最终可在 Grafana 中查看。
-5. 恢复：`log-processor` 重启、演示 Pod 替换和有界的 Kafka 不可用故障。
+5. 恢复：Kafka Broker Pod 替换后 Topic ID/拓扑/配置保持；后续再验证
+   `log-processor` 重启、演示 Pod 替换和有界的 Kafka 不可用故障。
 6. 性能：声明事件大小、速率和持续时间，并记录 p50/p95/p99、错误率和
    唯一文档数。
 

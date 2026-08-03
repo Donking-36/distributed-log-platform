@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - job.yaml
+
+components:
+  - ../../components/kafka-image
+
+configMapGenerator:
+  - name: kafka-topic-initializer
+    files:
+      - initialize-topics.sh
+
+generatorOptions:
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: kafka
+    app.kubernetes.io/component: topic-initializer
+    app.kubernetes.io/part-of: distributed-log-platform
+    distributed-log-platform.io/purpose: topic-initialization
+  # 脚本变化必须生成新名称，使新 Job 不会误用旧脚本。
+  disableNameSuffixHash: false
