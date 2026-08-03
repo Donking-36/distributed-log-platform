@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Broker、配置初始化容器和主题初始化 Job 必须复用同一份上游镜像身份。
+images:
+  - name: apache/kafka
+    newName: apache/kafka
+    digest: sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837

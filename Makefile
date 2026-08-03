@@ -16,9 +16,11 @@ KUBE_NAMESPACE ?= stage3-logs
 KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
 KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
 KUSTOMIZE_KAFKA_OVERLAY ?= deploy/kubernetes/overlays/local-kafka
+KUSTOMIZE_KAFKA_TOPICS_OVERLAY ?= deploy/kubernetes/overlays/local-kafka-topics
 ACCEPTANCE_RUN_ID ?=
 ACCEPTANCE_TIMEOUT ?= 60s
 KAFKA_ROLLOUT_TIMEOUT ?= 300s
+KAFKA_TOPIC_INIT_TIMEOUT ?= 300s
 
 # 这些值与 local-kafka overlay 构成同一镜像身份基线，更新时必须连同证据一起修改。
 override KAFKA_NODE_IMAGE := docker.io/apache/kafka:4.3.1
@@ -28,13 +30,15 @@ override EXPECTED_KAFKA_CONFIG_DIGEST := sha256:47dccc76b32761bc57462b8753144cdb
 # 镜像校验脚本只读取显式导出的项目参数，不自行维护另一份摘要常量。
 export MINIKUBE KUBECTL KUBE_CONTEXT KUBE_NAMESPACE KAFKA_NODE_IMAGE
 export EXPECTED_KAFKA_MANIFEST_DIGEST EXPECTED_KAFKA_CONFIG_DIGEST
+export KUSTOMIZE_KAFKA_TOPICS_OVERLAY KAFKA_TOPIC_INIT_TIMEOUT
 
 .PHONY: check version-check fmt fmt-check vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
-	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status
+	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status k8s-kafka-topics-render \
+	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
-check: version-check fmt-check vet test build
+check: version-check fmt-check vet test build kafka-topic-initializer-test
 
 # version-check 保证本地命令使用仓库约定的 Go 工具链。
 version-check:
@@ -71,6 +75,10 @@ test:
 # build 单独验证 main 包能够完成链接，不生成仓库内二进制。
 build:
 	$(GO) build -o /dev/null ./cmd/log-producer
+
+# kafka-topic-initializer-test 纯本地验证 Kafka 4.3.1 文本解析的正反例，不连接集群。
+kafka-topic-initializer-test:
+	@bash deploy/kubernetes/base/kafka-topics/initialize-topics.sh self-test
 
 # image 只允许开发标签或干净工作区的当前提交短 SHA，避免产生来源不明的镜像。
 image:
@@ -175,6 +183,26 @@ k8s-kafka-status:
 		get statefulsets,pods,services,persistentvolumeclaims \
 		-n $(KUBE_NAMESPACE) \
 		-l app.kubernetes.io/name=kafka \
+		-o wide
+
+# k8s-kafka-topics-render 只渲染一次性主题初始化资源，不包含 Broker 或命名空间。
+k8s-kafka-topics-render:
+	@$(KUBECTL) kustomize $(KUSTOMIZE_KAFKA_TOPICS_OVERLAY)
+
+# k8s-kafka-topics-validate 校验资源边界与服务端准入，全程不写入集群。
+k8s-kafka-topics-validate: k8s-context-check
+	@scripts/run-kafka-topic-initializer.sh validate
+
+# k8s-kafka-topics 安全重建固定名 Job；runner 自身在写入前执行节点镜像门禁。
+k8s-kafka-topics: k8s-kafka-topics-validate
+	@scripts/run-kafka-topic-initializer.sh run
+
+k8s-kafka-topics-status:
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		get jobs,pods,configmaps \
+		-n $(KUBE_NAMESPACE) \
+		-l distributed-log-platform.io/purpose=topic-initialization \
 		-o wide
 
 # k8s-acceptance-render 只渲染两个一次性 Job；批次 ID 必须由运行入口注入。

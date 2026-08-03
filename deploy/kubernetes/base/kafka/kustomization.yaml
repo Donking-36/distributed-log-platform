@@ -6,6 +6,9 @@ resources:
   - headless-service.yaml
   - statefulset.yaml
 
+components:
+  - ../../components/kafka-image
+
 configMapGenerator:
   - name: kafka-runtime
     literals:

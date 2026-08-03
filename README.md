@@ -95,9 +95,10 @@ docker run --rm \
 `deploy/kubernetes/base/namespace` 统一保存 `stage3-logs` 命名空间和 Restricted
 策略；`base/log-producer` 保存两个持续 Deployment，
 `base/log-producer-acceptance` 保存两个固定批次 Job，`base/kafka` 保存 Kafka
-Service、StatefulSet 和运行配置。持续应用、验收 Job 与有状态 Kafka 分别使用
-`overlays/local`、`overlays/local-acceptance`、`overlays/local-kafka`，共享基础定义
-但独立部署，避免应用更新隐式改动 Broker 或 PVC。
+Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主题初始化 Job。
+持续应用、验收 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
+`overlays/local-acceptance`、`overlays/local-kafka`、`overlays/local-kafka-topics`，
+共享基础定义但独立运行，避免应用或主题操作隐式改动 Broker、Namespace 或 PVC。
 
 本地 overlay 固定使用已经验证的应用代码提交 `d20fc7f`。首次部署前，先确认
 本地 Docker 中存在该标签并将其旁加载到 Minikube：
@@ -152,8 +153,8 @@ imageID 检查；任一摘要不匹配都会在写入或完成声明前失败。
 2 GiB PVC。Broker 请求 250m CPU/768 MiB，限制为 1 CPU/1536 MiB，JVM 堆为
 512 MiB；初始化容器先把镜像自带配置复制到可写配置卷，主容器再生成最终配置。
 两者均以 UID/GID 1000 运行并保持只读根文件系统。自动建主题已关闭，四个项目
-主题将在下一步由独立的幂等初始化流程创建。当前形态使用明文监听器且没有高可用，
-只用于本地开发。
+主题由下方独立的一次性流程创建。当前形态使用明文监听器且没有高可用，只用于
+本地开发。
 
 查看 KRaft 状态：
 
@@ -164,6 +165,44 @@ kubectl --context=stage3-logs exec -n stage3-logs kafka-0 -- \
   --bootstrap-server localhost:9092 \
   describe --status
 ```
+
+### Kafka 项目主题初始化
+
+主题初始化 overlay 只渲染一个带内容哈希的脚本 ConfigMap 和一个固定名 Job，
+不包含 Kafka StatefulSet、Service、Namespace 或 PVC。Job 通过集群内地址
+`kafka:9092` 管理以下主题：
+
+| 主题 | 分区 | 副本 |
+|---|---:|---:|
+| `logs.api-service` | 3 | 1 |
+| `logs.worker-service` | 3 | 1 |
+| `logs.unclassified` | 1 | 1 |
+| `logs.dlq` | 1 | 1 |
+
+每个主题都显式设置 `cleanup.policy=delete`、24 小时保留、每分区 128 MiB、
+64 MiB segment 和 `min.insync.replicas=1`。`retention.bytes` 是每分区限制，不能
+把它解释为整个主题的总容量。
+
+一次性 Job 请求 50m CPU/128 MiB，限制 500m CPU/384 MiB，CLI 堆为
+32～128 MiB。Job 自身 180 秒到期且不重试，宿主 runner 默认等待 300 秒，以便
+Kubernetes 先形成明确失败状态，再收集 Pod、事件和日志。
+
+```bash
+make k8s-kafka-topics-render
+make k8s-kafka-topics-validate
+make k8s-kafka-topics
+make k8s-kafka-topics-status
+```
+
+`k8s-kafka-topics-validate` 检查当前上下文、Broker `1/1`、客户端 Service、严格的
+“1 ConfigMap + 1 Job”资源边界、单容器镜像/拉取策略/摘要注解，再做服务端
+dry-run，全程不写集群；
+`k8s-kafka-topics` 先复用节点镜像摘要门禁，再安全替换属于本流程且已经终止的
+同名 Job。缺失主题会被创建；已有主题的分区、副本、ISR、重分配状态或上述显式
+配置只要不一致就直接失败，不自动扩分区、重分配副本、修改保留期或删除主题。
+显式配置使用 `kafka-configs` 的动态主题配置输出验证，不把 Broker 继承值误写成
+主题级 override。完成的 Job 会保留，作为最近一次执行证据；相关解析正反例已
+纳入默认 `make check`。
 
 查看两个真实日志源：
 
@@ -241,6 +280,9 @@ make k8s-kafka-validate
 make k8s-kafka-image-check
 make k8s-kafka-runtime-check
 make k8s-kafka-status
+make k8s-kafka-topics-render
+make k8s-kafka-topics-validate
+make k8s-kafka-topics-status
 ```
 
 `make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，且不会
@@ -263,5 +305,7 @@ make k8s-kafka-status
 限制和真实日志均已验证。Kafka 4.3.1 官方 JVM 镜像已经固定摘要，并通过宿主
 Docker 单节点主题与生产/消费冒烟；Kubernetes 中的 Service、StatefulSet、
 Restricted 安全上下文、资源边界、2 GiB PVC 和 KRaft DNS 也已验证。同一 PVC
-上的 Pod 重建保留了 KRaft 元数据；主题和消息恢复尚未验证。Kubernetes 主题
-初始化与 Filebeat 尚未部署。
+上的 Pod 重建保留了 KRaft 元数据。独立主题初始化 Job 已显式创建四个项目主题，
+双次运行保持 Topic ID 不变；在不重跑 Job 的前提下重建 Broker Pod 后，四个
+Topic ID、拓扑和配置仍保持。Kubernetes 集群内生产/消费、消息恢复与 Filebeat
+尚未验证。

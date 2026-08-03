@@ -263,7 +263,8 @@ MaxFollowerLag=0
 ```
 
 Pod 身份改变而 PVC、Cluster ID 和 voter 保持稳定，证明当前单节点元数据能在
-同卷 Pod 重建后恢复；本步没有证明主题或消息恢复。最终完整 1371 行启动日志中
+同卷 Pod 重建后恢复；本节当时没有证明主题或消息恢复，主题结果见下一节。最终
+完整 1371 行启动日志中
 `ERROR`、`FATAL`、`Reconfiguration`、`Read-only` 和 `StatusConsoleListener`
 匹配数均为 0。
 
@@ -273,7 +274,121 @@ Pod 身份改变而 PVC、Cluster ID 和 voter 保持稳定，证明当前单节
 `git diff --check` 均通过；持续应用 overlay 与 Kafka overlay 的 `kubectl diff`
 均为空。Broker API、Kafka 4.3.1 版本和 KRaft quorum 命令均成功。
 
-本节尚未创建四个项目主题，也未验证主题在重启后的保留、集群内生产/消费或
-Filebeat→Kafka。plaintext、单副本和 combined KRaft 只适用于本地开发，不代表
-TLS/SASL、高可用或生产容量。liveness 使用 TCP 以避免周期性探针 JVM；它不能
-单独识别“端口仍监听但 Broker API 无响应”的故障。
+本节的后续主题创建与重启保留结果见下一节；集群内生产/消费和
+Filebeat→Kafka 仍未验证。plaintext、单副本和 combined KRaft 只适用于本地开发，
+不代表 TLS/SASL、高可用或生产容量。liveness 使用 TCP 以避免周期性探针 JVM；
+它不能单独识别“端口仍监听但 Broker API 无响应”的故障。
+
+## Kafka 4.3.1：Kubernetes 项目主题初始化与恢复
+
+- 日期：2026-08-03
+- 入口：`make k8s-kafka-topics`
+- 资源：一个哈希 ConfigMap、一个固定名 Job，不包含 Broker 或 PVC
+
+### 主题契约与安全边界
+
+主题 Job 通过 `kafka:9092` 连接已有 Broker，自动建主题仍关闭。四个主题的最终
+契约为：
+
+| 主题 | Topic ID | 分区 | 副本 |
+|---|---|---:|---:|
+| `logs.api-service` | `F1dCjCVcR2OEbUvD1NijAQ` | 3 | 1 |
+| `logs.worker-service` | `FpyNrYc_Ti2Rf0C4p1jEdQ` | 3 | 1 |
+| `logs.unclassified` | `BC8NMPRjSYuGOjb0xgOM8w` | 1 | 1 |
+| `logs.dlq` | `zAeElgK9Sw6L7OsZZc_h3Q` | 1 | 1 |
+
+四个主题均显式验证：
+
+```text
+cleanup.policy=delete
+retention.ms=86400000
+retention.bytes=134217728
+segment.bytes=67108864
+min.insync.replicas=1
+```
+
+`retention.bytes` 按分区计算。脚本先检查全部已存在主题，再创建缺失主题；已有主题
+只做严格断言，不自动扩分区、重分配副本、修改保留期或删除主题。Job 使用
+`backoffLimit: 0`，不以自动重试掩盖失败；完成后保留，宿主 runner 只会替换用途
+标签正确且已经终止的同名 Job。
+
+### 清单、镜像与反例门禁
+
+`make k8s-kafka-topics-validate` 确认 overlay 恰好渲染一个
+`kafka-topic-initializer-<hash>` ConfigMap 和一个 `kafka-topic-initializer` Job，
+并用临时 `generateName` 完成服务端 dry-run，全程未写入集群。故意把包含
+Namespace、Service、StatefulSet 与 PVC 的 `local-kafka` overlay 传给 runner 时，
+门禁识别第一个越界 Namespace 并按预期退出非零。
+
+独立审查又发现直接调用 runner 时可以绕过 Make 的节点摘要前置目标。修复后，
+runner 在任何写操作前严格断言 Job 只有一个 `kafka-topic-initializer` 容器、镜像为
+`apache/kafka:4.3.1`、拉取策略为 `Never`、摘要注解匹配，并自行执行节点
+manifest/config 门禁。把预期节点标签改成 `apache/kafka:4.3.0` 的无写入反例按
+预期失败；最终真实运行的顺序为节点摘要通过、ConfigMap apply、再次核对旧 Job
+UID/用途/终态、删除旧 Job、创建新 Job。
+
+Broker、配置初始化容器和主题 Job 共享同一 Kafka 镜像 Component。抽取前后
+`kubectl diff -k deploy/kubernetes/overlays/local-kafka` 为空；运行前节点 manifest/
+config 门禁通过，Job Pod 的运行时 config digest 为：
+
+```text
+sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11
+```
+
+Job 以 UID/GID 1000、Restricted、只读根文件系统运行；关闭 token 与 ServiceLinks，
+只挂载只读脚本和 64 MiB `/tmp`，没有 Kubernetes RBAC 或 Kafka 数据 PVC。资源
+请求为 50m CPU/128 MiB，限制为 500m CPU/384 MiB，CLI 堆为 32～128 MiB；Job
+180 秒到期且不重试，runner 默认 300 秒超时用于等待终态和收集诊断。
+
+### 双次运行与 Pod 重建
+
+第一次运行创建 ConfigMap `kafka-topic-initializer-66bf646fdd` 和单 Pod Job；Job
+成功、Pod 0 重启，日志按当时解析输出四条 `TOPIC_VERIFIED`；后续审查发现配置
+来源证明不足并按下文修复、复跑。
+第二次运行先安全删除已完成的同名 Job，ConfigMap 为 `unchanged`；四个 Topic ID
+与第一次完全相同，证明重复入口不会重复创建或替换正确主题。
+
+解析审查发现 `kafka-topics --describe` header 的 `Configs` 会混入 Broker 继承值，
+且不能无歧义表示 `cleanup.policy=delete,compact` 这类含逗号值。修复后，该命令
+只负责 Topic ID、分区、副本、Leader、ISR 和重分配验证；五项显式 override 改由
+`kafka-configs --describe` 的逐行 `DYNAMIC_TOPIC_CONFIG` 验证，并拒绝任何缺项、
+额外动态配置或错误值。默认 `make check` 新增纯本地解析自测，1 个正例和
+`delete,compact`、缺项、额外项、错误副本、ISR 不完整、重分配 6 个失败反例均
+通过。
+
+修复后的最终真实运行创建当前 ConfigMap
+`kafka-topic-initializer-m49d5b8kth`；Job UID 为
+`0c967ba6-156f-4f67-a973-ed5d6f1ebc0d`，从 `2026-08-03T05:02:12Z` 到
+`05:03:28Z` 完成，单 Pod、0 重启，运行时镜像摘要匹配，四个 Topic ID 仍与上表
+一致。此前 ConfigMap `kafka-topic-initializer-66bf646fdd` 作为旧脚本证据保留，
+当前 Job 只引用新哈希；本轮没有执行无选择器的清理。
+
+在解析审查与最终复跑之前，曾在不重跑初始化 Job 的前提下执行恢复验证。删除前
+先确认 `kafka-0` 归属
+`StatefulSet/kafka`、PVC 为 Bound、主题 Job 为 Complete；结果为：
+
+```text
+old Pod UID=13e17f46-1d3a-4cde-aaa8-53a53053573d
+new Pod UID=a239ea77-f954-49b4-8d16-3a5b3cb8f981
+PVC UID=6bc802f0-4c09-478c-bf7d-a61dcb25dd13
+topic Job UID=9f7be223-c940-46f8-89c2-db2b24dbe329
+ClusterId=7KrkiFZsTlGTY-F1HBdr9Q
+LeaderEpoch=4
+MaxFollowerLag=0
+```
+
+Pod UID 改变，PVC UID 与主题 Job UID 不变。新 Broker Ready 后、任何主题初始化
+入口再次运行前，直接 describe 得到相同的四个 Topic ID、分区、副本、ISR 和五项
+有效配置值；该旧检查本身不能证明配置来源。后续修复版 Job 在任何主题写入前通过
+`kafka-configs` 确认五项均为主题级动态 override，且该轮四个主题都已存在，没有
+执行 create 或 alter。重建后双容器运行时镜像检查再次通过，完整 1402 行启动日志中
+`ERROR`、`FATAL`、`Reconfiguration`、`Read-only`、`StatusConsoleListener` 匹配数
+为 0。
+
+### 未覆盖边界
+
+本节证明单节点开发环境中的主题定义、幂等初始化和同一 PVC 上的主题元数据恢复；
+尚未在 Kubernetes 中写入或消费消息，因此不证明消息恢复、Filebeat→Kafka、
+多 Broker 副本恢复、TLS/SASL、高可用或生产容量。四个主题的创建不是事务；若
+中途失败，只有已经创建且契约正确的主题可以保留并由重跑继续创建余下主题；
+任何漂移都会继续失败并要求人工判断处理，不能宣称自动收敛或原子完成。
