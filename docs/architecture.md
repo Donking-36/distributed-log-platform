@@ -119,8 +119,10 @@ UC-001/UC-002 验收链路全绿之后。
 开发基线已通过部署冒烟：每个 Pod 请求 10m CPU/16 MiB 内存，上限为
 100m CPU/64 MiB 内存；一次稳定运行快照中 cgroup `memory.current` 约为
 7.8 MB，两个 Pod 均无重启。该值只用于当前本地集群，不代表生产容量。
-Kafka 和 Elasticsearch 使用小型开发堆内存、单副本和短保留期；它们的具体
-资源和堆内存值只有通过对应组件冒烟测试后才能采纳。
+Kafka 和 Elasticsearch 使用小型开发堆内存、单副本和短保留期。Kafka 4.3.1
+已在宿主 Docker 中通过 1 CPU、1.5 GiB 容器上限的兼容性冒烟，稳定时一次资源
+快照约为 544 MiB；该结果只证明当前镜像可以在此资源包络中启动并完成基础
+生产/消费，不直接等同于 Kubernetes 的最终堆内存、存储和保留期配置。
 
 ## 5. 主题、索引与查询路径
 
@@ -134,8 +136,8 @@ Kafka 和 Elasticsearch 使用小型开发堆内存、单副本和短保留期�
 | `logs.dlq` | 1 | 1 | 永久无效事件和处理证据 |
 
 已知服务使用稳定的 Pod UID 作为分区键。未知标签不能创建任意主题名。初始
-保留期较短且仅用于本地环境；通过 Kafka 兼容性冒烟测试后，再在 Kafka
-清单中固定具体时长。
+保留期较短且仅用于本地环境；Kafka 基础兼容性冒烟已经通过，具体保留时长仍
+需结合 Kubernetes 存储和恢复验证后写入清单。
 
 这些主题数量和兜底路径已由 ADR-001/ADR-002 接受。业务主题从创建时起即为
 多分区；消费者副本扩缩容实验本身仍然延期。
@@ -190,7 +192,7 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | Minikube | 本地已验证：1.38.1 | `minikube version` / 配置实例证据 |
 | Kubernetes | 集群已验证：v1.35.1 | `stage3-logs` 节点为 Ready |
 | containerd | 集群已验证：2.2.1 | 节点运行时输出 |
-| Kafka 镜像 | 待定 | 单节点生产/消费冒烟测试通过后固定镜像标签和摘要 |
+| Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；单节点 KRaft、主题、生产/消费和同键分区冒烟通过 |
 | Filebeat 镜像 | 待定 | 通过 Filebeat→Kafka 配置/输出检查，并保留必需的真实事件字段 |
 | Elasticsearch 镜像 | 待定 | 健康、模板、索引和查询冒烟测试通过后固定镜像标签和摘要 |
 | Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
@@ -199,6 +201,14 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 
 “待定”不是可部署版本。任何清单都不得使用 `latest`。每个镜像选定后，
 必须记录精确的镜像标签、摘要、来源文档和冒烟测试结果，才能替换“待定”。
+
+Kafka 4.3.1 是 2026-06-25 发布的当前受支持修复版。项目使用 JVM 官方镜像，
+不使用仍标记为实验性的 `apache/kafka-native`。本地冒烟采用默认的单节点
+combined KRaft 模式，镜像内为非 root `appuser` 和 OpenJDK 21.0.11。官方来源为
+[Apache Kafka 下载页](https://kafka.apache.org/community/downloads/)、
+[4.3 Docker 指南](https://kafka.apache.org/43/getting-started/docker/)和
+[KRaft 说明](https://kafka.apache.org/43/operations/kraft/)。combined 模式仅
+用于本地开发验证，不代表控制器隔离、故障容忍或生产高可用。
 
 ## 9. 验证层次
 
@@ -217,7 +227,8 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 
 ## 10. 延期决策
 
-- Kafka、Elastic 和 Grafana 镜像的精确固定版本。
+- Kafka 的 Kubernetes 监听器、堆内存、存储和保留期；Filebeat、Elastic 和
+  Grafana 镜像的精确固定版本。
 - 精确的堆内存、资源请求、资源限制和数据保留值。
 - UC-003 告警、Prometheus、HPA 和多分区扩缩容实验。
 - 生产级可用性、安全性和跨集群采集。

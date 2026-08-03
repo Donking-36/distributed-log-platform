@@ -207,4 +207,6 @@ make k8s-status
 并通过单元测试、静态检查、构建、本地运行和容器冒烟。两个非 root
 `log-producer` Deployment 已通过 Kustomize 部署到 `stage3-logs`；两个独立
 验收 Job 已验证各输出 20 条连续 JSON。Downward API 身份、安全上下文、资源
-限制和真实日志均已验证；Kafka 与 Filebeat 尚未部署。
+限制和真实日志均已验证。Kafka 4.3.1 官方 JVM 镜像已经固定摘要，并通过宿主
+Docker 单节点 KRaft、主题创建、生产/消费和同键分区冒烟；Kafka Kubernetes
+清单与 Filebeat 尚未部署。
