@@ -178,6 +178,10 @@ func TestParseFilebeatRejectsPermanentInvalidInput(t *testing.T) {
 			payload: strings.Replace(validFilebeatPayload, `2026-08-03T08:22:16.507475585Z`, `not-a-time`, 1),
 			field:   "@timestamp",
 		},
+		"timestamp is zero value": {
+			payload: strings.Replace(validFilebeatPayload, `2026-08-03T08:22:16.507475585Z`, `0001-01-01T00:00:00Z`, 1),
+			field:   "@timestamp",
+		},
 		"sequence is zero": {
 			payload: strings.Replace(validFilebeatPayload, `\"event.sequence\":1`, `\"event.sequence\":0`, 1),
 			field:   "event.sequence",

@@ -98,6 +98,9 @@ func ParseFilebeat(payload []byte) (Event, error) {
 	if parseErr != nil {
 		return Event{}, invalid("@timestamp", "必须是 RFC3339 时间")
 	}
+	if timestamp.IsZero() {
+		return Event{}, invalid("@timestamp", "不能是零值时间")
+	}
 	sequence, err := requiredInteger(source.Sequence, "event.sequence", 1)
 	if err != nil {
 		return Event{}, err
@@ -138,6 +141,7 @@ func ParseFilebeat(payload []byte) (Event, error) {
 		ContainerID: containerID,
 		LogFilePath: logFilePath,
 		LogOffset:   logOffset,
+		rawMessage:  rawMessage,
 	}, nil
 }
 
