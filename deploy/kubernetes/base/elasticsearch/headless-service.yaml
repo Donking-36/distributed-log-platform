@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-headless
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/instance: elasticsearch
+    app.kubernetes.io/component: search-storage
+    app.kubernetes.io/part-of: distributed-log-platform
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/instance: elasticsearch
+  ports:
+    - name: transport
+      port: 9300
+      targetPort: transport
+      protocol: TCP

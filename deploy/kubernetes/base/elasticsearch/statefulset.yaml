@@ -1,0 +1,168 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/instance: elasticsearch
+    app.kubernetes.io/component: search-storage
+    app.kubernetes.io/part-of: distributed-log-platform
+spec:
+  serviceName: elasticsearch-headless
+  replicas: 1
+  revisionHistoryLimit: 2
+  podManagementPolicy: OrderedReady
+  persistentVolumeClaimRetentionPolicy:
+    # 删除或缩容工作负载时保留数据，清理 PVC 必须是独立且显式的操作。
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
+      app.kubernetes.io/instance: elasticsearch
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch
+        app.kubernetes.io/instance: elasticsearch
+        app.kubernetes.io/component: search-storage
+        app.kubernetes.io/part-of: distributed-log-platform
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-config
+          # 同一镜像提供受版本控制的默认配置，避免手工复制一份易漂移的 elasticsearch.yml。
+          image: elasticsearch:unconfigured
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              cp -R /usr/share/elasticsearch/config/. /generated-config/
+              test -s /generated-config/elasticsearch.yml
+              test -s /generated-config/jvm.options
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: generated-config
+              mountPath: /generated-config
+      containers:
+        - name: elasticsearch
+          image: elasticsearch:unconfigured
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: ES_SETTING_NODE_NAME
+              value: $(POD_NAME)
+            - name: ES_SETTING_CLUSTER_NAME
+              value: stage3-logs
+            # 当前版本只部署一个开发节点，不执行多节点发现或选主。
+            - name: ES_SETTING_DISCOVERY_TYPE
+              value: single-node
+            # 本地环境不访问外网下载 GeoIP 数据库，避免后台任务产生无意义错误。
+            - name: ES_SETTING_INGEST_GEOIP_DOWNLOADER_ENABLED
+              value: "false"
+            # 固定堆只用于当前开发资源包络；生产环境应改用 jvm.options.d。
+            - name: ES_JAVA_OPTS
+              value: -Xms1g -Xmx1g
+          ports:
+            - name: http
+              containerPort: 9200
+              protocol: TCP
+            - name: transport
+              containerPort: 9300
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 1500m
+              memory: 2Gi
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?wait_for_status=yellow&timeout=1s
+              port: http
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # 不设置激进存活探针，避免短时 GC 或 segment merge 触发有状态节点重启。
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+            - name: generated-config
+              mountPath: /usr/share/elasticsearch/config
+            - name: logs
+              mountPath: /usr/share/elasticsearch/logs
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: generated-config
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: logs
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: elasticsearch
+          app.kubernetes.io/instance: elasticsearch
+          app.kubernetes.io/component: search-storage
+          app.kubernetes.io/part-of: distributed-log-platform
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        volumeMode: Filesystem
+        resources:
+          requests:
+            storage: 5Gi

@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Docker Official Image 由 Elastic Team 维护；base 固定多架构索引摘要。
+images:
+  - name: elasticsearch
+    newName: docker.io/library/elasticsearch
+    digest: sha256:7de2137b43d9f263cffe51f139a9f3144da7b9941de615fb4317fc539f4d16a7

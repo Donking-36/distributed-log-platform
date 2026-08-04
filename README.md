@@ -40,9 +40,10 @@ UC-004、生产级多节点高可用、多租户、自研网页界面和重复�
 - Go 工具链和项目基线：1.26.5
 
 Kafka 已选定 Apache 官方 JVM 镜像 4.3.1；Filebeat 已选定官方 Wolfi 镜像
-9.4.4。两者均已通过固定摘要、Minikube 运行时和真实消息链路验证。
-Elasticsearch 与 Grafana 的镜像版本仍须通过各自兼容性冒烟后选定。任何部署
-清单都不得使用 `latest`。
+9.4.4；Elasticsearch 已选定 Elastic Team 维护的 Docker Official Image 9.4.4。
+三者均已通过固定摘要和 Minikube 运行时验证，Kafka/Filebeat 还完成了真实消息
+链路验证，Elasticsearch 完成了模板与 Bulk 幂等冒烟。Grafana 镜像仍须通过兼容性
+冒烟后选定。任何部署清单都不得使用 `latest`。
 
 ## 当前可运行组件
 
@@ -99,11 +100,12 @@ docker run --rm \
 `base/log-producer-acceptance` 保存两个固定批次 Job，`base/kafka` 保存 Kafka
 Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主题初始化 Job；
 `base/filebeat` 与 `base/filebeat-metadata-access` 分别保存采集器和目标命名空间
-Pod-only RBAC。
+Pod-only RBAC；`base/elasticsearch` 保存单节点 StatefulSet、Service、PVC 契约
+和索引模板，`components/elasticsearch-image` 单独固定镜像摘要。
 持续应用、验收 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
 `overlays/local-acceptance`、`overlays/local-kafka`、`overlays/local-kafka-topics`、
-`overlays/local-filebeat`，共享基础定义但独立运行，避免应用、采集或主题操作
-隐式改动其他组件、Namespace 或 PVC。
+`overlays/local-filebeat`、`overlays/local-elasticsearch`，共享基础定义但独立
+运行，避免应用、采集、主题或搜索存储操作隐式改动其他组件、Namespace 或 PVC。
 
 本地 overlay 固定使用已经验证的应用代码提交 `d20fc7f`。首次部署前，先确认
 本地 Docker 中存在该标签并将其旁加载到 Minikube：
@@ -208,6 +210,40 @@ dry-run，全程不写集群；
 显式配置使用 `kafka-configs` 的动态主题配置输出验证，不把 Broker 继承值误写成
 主题级 override。完成的 Job 会保留，作为最近一次执行证据；相关解析正反例已
 纳入默认 `make check`。
+
+### Elasticsearch 单节点基线
+
+Elasticsearch 使用 Elastic Team 维护的 Docker Official Image 9.4.4。base 固定
+多架构索引摘要，本地 overlay 使用已经旁加载的 linux/amd64 标签并保存上游索引、
+上游 amd64、节点 manifest 和 config 四层证据：
+
+```bash
+docker pull \
+  docker.io/library/elasticsearch@sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c
+docker tag \
+  docker.io/library/elasticsearch@sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c \
+  docker.io/library/elasticsearch:9.4.4
+minikube image load \
+  -p stage3-logs \
+  docker.io/library/elasticsearch:9.4.4
+
+make k8s-elasticsearch-render
+make k8s-elasticsearch-validate
+make k8s-elasticsearch-image-check
+make k8s-elasticsearch-deploy
+make k8s-elasticsearch-template
+make k8s-elasticsearch-status
+```
+
+该入口部署 1 个 StatefulSet、普通 ClusterIP Service、Headless Service 和 5 GiB
+Retain PVC，不创建 NodePort、LoadBalancer 或 Ingress。主容器请求 500m CPU/2 GiB，
+限制 1500m CPU/2 GiB，JVM 堆固定为 1 GiB。初始化容器把镜像默认配置复制到可写
+配置卷，主容器随后以 UID/GID 1000、Restricted 安全上下文和只读根文件系统运行。
+
+`local-elasticsearch` 为避免特权 sysctl 初始化而禁用 mmap，并关闭 Elasticsearch
+认证和 TLS；这只适用于隔离的本地 Minikube，不能用于对外环境。索引模板
+`logs-stage3-v1` 匹配 `logs-stage3-*`，使用优先级 501 覆盖内置 `logs-*-*`
+模板；字段严格遵循最小日志契约，1 分片、0 副本。
 
 ### Filebeat 节点采集
 
@@ -351,6 +387,11 @@ make k8s-kafka-status
 make k8s-kafka-topics-render
 make k8s-kafka-topics-validate
 make k8s-kafka-topics-status
+make k8s-elasticsearch-render
+make k8s-elasticsearch-validate
+make k8s-elasticsearch-image-check
+make k8s-elasticsearch-runtime-check
+make k8s-elasticsearch-status
 ```
 
 `make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，并执行所有
@@ -385,3 +426,10 @@ Topic ID、拓扑和配置仍保持。Filebeat 9.4.4 Wolfi 已以独立 DaemonSe
 缺席窗口产生的 40 条日志已于恢复后全部进入正确主题，0 条物理重复；StatefulSet
 UID、PVC UID/PV 和 Cluster ID 保持，故障前位点连续可读并在恢复后继续推进。该
 证据不外推为多节点高可用、任意长中断、队列容量或磁盘损坏恢复保证。
+
+Elasticsearch 9.4.4 已以单节点 StatefulSet 部署，5 GiB PVC、ClusterIP、
+Restricted 安全上下文、只读根、1 GiB 堆和镜像身份均已验证。索引模板的 14 个
+字段类型、1 分片/0 副本以及 `dynamic: strict` 已生效；真实 Bulk `create` 首次
+返回 201，同一 `_id` 重复创建返回单项 409，索引内仍只有 1 个文档。该证据只
+证明 Elasticsearch 服务端契约，尚未证明 `log-processor` 的 Kafka 消费与端到端
+写入。

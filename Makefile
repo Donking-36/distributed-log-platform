@@ -19,10 +19,13 @@ KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
 KUSTOMIZE_KAFKA_OVERLAY ?= deploy/kubernetes/overlays/local-kafka
 KUSTOMIZE_KAFKA_TOPICS_OVERLAY ?= deploy/kubernetes/overlays/local-kafka-topics
 KUSTOMIZE_FILEBEAT_OVERLAY ?= deploy/kubernetes/overlays/local-filebeat
+KUSTOMIZE_ELASTICSEARCH_OVERLAY ?= deploy/kubernetes/overlays/local-elasticsearch
+ELASTICSEARCH_INDEX_TEMPLATE ?= deploy/kubernetes/base/elasticsearch/index-template.json
 ACCEPTANCE_RUN_ID ?=
 ACCEPTANCE_TIMEOUT ?= 60s
 KAFKA_ROLLOUT_TIMEOUT ?= 300s
 KAFKA_TOPIC_INIT_TIMEOUT ?= 300s
+ELASTICSEARCH_ROLLOUT_TIMEOUT ?= 300s
 FILEBEAT_NAMESPACE ?= stage3-collector
 FILEBEAT_ROLLOUT_TIMEOUT ?= 180s
 FILEBEAT_ACCEPTANCE_TIMEOUT ?= 120s
@@ -49,6 +52,11 @@ override EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST := sha256:3d14aa62612275ffae458
 override EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST := sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9
 override EXPECTED_FILEBEAT_CONFIG_DIGEST := sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf
 
+# Elasticsearch 使用 Elastic Team 维护的 Docker Official Image；节点摘要记录旁加载后的实际身份。
+override ELASTICSEARCH_NODE_IMAGE := docker.io/library/elasticsearch:9.4.4
+override EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST := sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677
+override EXPECTED_ELASTICSEARCH_CONFIG_DIGEST := sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640
+
 # 镜像校验脚本只读取显式导出的项目参数，不自行维护另一份摘要常量。
 export MINIKUBE KUBECTL KUBE_CONTEXT KUBE_NAMESPACE KAFKA_NODE_IMAGE
 export EXPECTED_KAFKA_MANIFEST_DIGEST EXPECTED_KAFKA_CONFIG_DIGEST
@@ -59,11 +67,15 @@ export FILEBEAT_FALLBACK_TIMEOUT FILEBEAT_RECOVERY_TIMEOUT FILEBEAT_RECOVERY_SET
 export FILEBEAT_OUTAGE_TIMEOUT FILEBEAT_OUTAGE_SETTLE_SECONDS FILEBEAT_OUTAGE_PROBE_TIMEOUT
 export FILEBEAT_NODE_IMAGE EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST
 export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
+export KUSTOMIZE_ELASTICSEARCH_OVERLAY ELASTICSEARCH_ROLLOUT_TIMEOUT ELASTICSEARCH_NODE_IMAGE
+export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGEST
 
 .PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
 	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status k8s-kafka-topics-render \
 	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test \
+	k8s-elasticsearch-render k8s-elasticsearch-validate k8s-elasticsearch-image-check \
+	k8s-elasticsearch-runtime-check k8s-elasticsearch-deploy k8s-elasticsearch-status k8s-elasticsearch-template \
 	filebeat-config-check k8s-filebeat-render k8s-filebeat-validate k8s-filebeat-image-check \
 	k8s-filebeat-runtime-check k8s-filebeat-deploy k8s-filebeat-status k8s-filebeat-acceptance \
 	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery k8s-filebeat-kafka-outage-recovery
@@ -243,6 +255,69 @@ k8s-kafka-topics-status:
 		-n $(KUBE_NAMESPACE) \
 		-l distributed-log-platform.io/purpose=topic-initialization \
 		-o wide
+
+# k8s-elasticsearch-render 只渲染单节点 Elasticsearch，不连接或修改集群。
+k8s-elasticsearch-render:
+	@$(KUBECTL) kustomize $(KUSTOMIZE_ELASTICSEARCH_OVERLAY)
+
+# k8s-elasticsearch-validate 使用目标 API Server 校验清单，但不创建资源。
+k8s-elasticsearch-validate: k8s-context-check
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		--dry-run=server \
+		-k $(KUSTOMIZE_ELASTICSEARCH_OVERLAY)
+
+# k8s-elasticsearch-image-check 在部署前校验节点内旁加载镜像的实际摘要。
+k8s-elasticsearch-image-check: k8s-context-check
+	@scripts/verify-elasticsearch-image.sh node
+
+# k8s-elasticsearch-runtime-check 核对主容器和配置初始化容器的运行时 imageID。
+k8s-elasticsearch-runtime-check: k8s-context-check
+	@scripts/verify-elasticsearch-image.sh pod
+
+k8s-elasticsearch-deploy: k8s-elasticsearch-validate k8s-elasticsearch-image-check
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		-k $(KUSTOMIZE_ELASTICSEARCH_OVERLAY)
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		rollout status \
+		statefulset/elasticsearch \
+		-n $(KUBE_NAMESPACE) \
+		--timeout=$(ELASTICSEARCH_ROLLOUT_TIMEOUT)
+	@scripts/verify-elasticsearch-image.sh pod
+
+k8s-elasticsearch-status:
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		get statefulsets,pods,services,persistentvolumeclaims \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=elasticsearch \
+		-o wide
+
+# 模板从仓库经标准输入发送给 Pod 内 curl；入口幂等覆盖同名模板并设置明确超时。
+k8s-elasticsearch-template: k8s-elasticsearch-runtime-check
+	@test -s "$(ELASTICSEARCH_INDEX_TEMPLATE)" || { \
+		echo "Elasticsearch 索引模板不存在或为空：$(ELASTICSEARCH_INDEX_TEMPLATE)"; \
+		exit 1; \
+	}
+	@response="$$($(KUBECTL) --context=$(KUBE_CONTEXT) exec pod/elasticsearch-0 \
+		-i -n $(KUBE_NAMESPACE) -c elasticsearch -- \
+		curl --silent --show-error --fail-with-body \
+		--connect-timeout 5 \
+		--max-time 30 \
+		--request PUT \
+		--header 'Content-Type: application/json' \
+		--data-binary @- \
+		http://127.0.0.1:9200/_index_template/logs-stage3-v1 \
+		< "$(ELASTICSEARCH_INDEX_TEMPLATE)")"; \
+	if [ "$$response" != '{"acknowledged":true}' ]; then \
+		echo "Elasticsearch 索引模板响应异常：$$response"; \
+		exit 1; \
+	fi; \
+	echo "Elasticsearch 索引模板已确认：logs-stage3-v1"
 
 # filebeat-config-check 使用固定官方镜像验证配置，并包含一个非法协议版本反例。
 filebeat-config-check:
