@@ -834,11 +834,10 @@ GO=/usr/local/go/bin/go GOFMT=/usr/local/go/bin/gofmt make check
 通过：版本、格式、Shell、Python fixture、vet、全量测试、构建和主题初始化器自测
 ```
 
-本节只验证单元边界，尚未覆盖真实 Kafka 的 DLQ Broker 确认、源消费者组位点、
-毒消息后下一条有效记录继续处理或 DLQ 重试。下述串行入口已完成 Poll 接线，但
-真实 Kafka DLQ 联动仍待验证。Base64 会使原始载荷增大约三分之一，当前也尚未为
-源主题、DLQ 主题与 franz-go producer 对齐明确的最大消息边界；真实大载荷矩阵
-在主链路受控小载荷验收后补做。
+本节只验证单元边界；后文的真实 Runner 联动已经补上 DLQ Broker 确认、源消费者组
+位点和毒消息后继续处理的小载荷证据，但尚未覆盖 DLQ 重试。Base64 会使原始载荷
+增大约三分之一，当前也尚未为源主题、DLQ 主题与 franz-go producer 对齐明确的
+最大消息边界；真实大载荷矩阵在后续独立切片补做。
 
 ### Go log-processor 串行运行入口
 
@@ -888,9 +887,52 @@ git diff --check
 通过
 ```
 
-本节只证明最小串行循环、配置和生命周期契约已经接线并可构建。尚未证明真实
-Kafka→Elasticsearch、真实 Kafka DLQ、处理器健康接口、容器/Kubernetes 部署、
-重启恢复或完整 UC-001B 端到端链路。
+本节证明最小串行循环、配置和生命周期契约已经接线并可构建；真实依赖证据见
+下一节。处理器健康接口、容器/Kubernetes 部署、重启恢复和完整 UC-001B 端到端
+链路仍待验证。
+
+### 真实 Runner→Elasticsearch/DLQ 联动
+
+2026-08-04 扩展既有 `make kafka-consumer-integration`，没有新增脚本。入口在
+Kafka Pod 中运行同一个 pipeline 集成测试二进制，真实组装 Consumer、官方
+Elasticsearch Client、DLQ Producer、Processor、DeliveryCycle、DeadLetterHandler
+和 Runner。唯一源主题按 offset 0/1/2 写入“有效→服务身份不一致→有效”三条
+Filebeat 小载荷；测试接缝只在三条记录处理完成后的第四次 Poll 返回受控停止错误，
+因此不替换外部依赖，也不会在第三条 ES 已写入但 Kafka 尚未提交时提前结束。
+
+最终证据：
+
+```text
+run_id=20260804t094109z-614392
+topic=logs.integration.kafka-consumer.20260804t094109z-614392
+topic_id=e7nrpTanQt-9il57sRHmzA
+consumer_next_offset=2
+pipeline_next_offset=1
+runner_group=integration.log-runner.20260804t094109z-614392
+runner_next_offset=3
+elasticsearch_index=logs-stage3-runner-integration-20260804t094109z-614392
+elasticsearch_documents=2
+dlq_partition=0
+dlq_range=[0,1)
+cleanup=源 topic、三个 group、临时 ES 索引、Pod/本地测试二进制均不存在
+```
+
+Elasticsearch 刷新后文档数恰为 2，并按两个有效 fixture 计算的稳定 EventID 分别
+执行 HEAD=200；这同时证明 offset 1 的永久无效事件没有进入索引。DLQ 观察客户端
+从运行前末端位点 0 定点读取，验证稳定 key、`schema_version=1`、源坐标
+offset 1、`error.field=service.name`、尝试次数 1、唯一 `test_run_id`，并将 Base64
+解码后与原始 Kafka value 逐字节比较。脚本随后独立确认 DLQ 末端位点只增加到 1，
+源 Runner 组提交点为 3。
+
+脚本的 Elasticsearch HEAD 曾因使用 `curl --request HEAD` 等待不存在的响应正文而
+挂起；修复为真正的 `--head`，并为 Pod 内 curl 和宿主 `kubectl exec` 分别增加
+10 秒和 15 秒上限。修复后的只读探针返回 404，真实验收随后通过。共享
+`logs.dlq` 不可安全删除单条记录，本轮唯一验收记录由主题 24 小时保留策略清理；
+脚本没有删除、截断或重建该固定主题。
+
+该证据只覆盖单分区、三个受控小载荷和正常依赖。重复投递幂等、真实重平衡、
+提交响应丢失、Elasticsearch/Kafka 故障、进程重启、多分区连续前缀和大载荷矩阵
+仍待后续验证。
 
 ### 当前边界
 
@@ -901,7 +943,7 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 它不代表多节点故障转移、任意长中断、队列饱和、节点磁盘丢失、TLS/SASL 或
 生产容量；Elasticsearch 服务端、Go Bulk 写入和 Kafka 单条显式提交边界已经覆盖，
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
-Broker 位点复核；但 Elasticsearch 仍是替身，尚未覆盖真实 Kafka→Elasticsearch
-联动、多记录/多分区连续前缀位点推进、真实重平衡、提交失败或响应丢失后的真实
-恢复、真实 Kafka DLQ 联动、处理器健康接口、容器与 Kubernetes 部署、处理器重启、
-端到端恢复以及 Grafana 查询链路。串行持续处理入口已接线，但上述真实联动未完成。
+Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
+Kafka、Elasticsearch 和 DLQ。尚未覆盖重复投递、多记录/多分区连续前缀位点推进、
+真实重平衡、提交失败或响应丢失后的真实恢复、处理器健康接口、容器与 Kubernetes
+部署、处理器重启、端到端恢复以及 Grafana 查询链路。

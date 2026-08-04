@@ -1,6 +1,6 @@
 # 架构
 
-- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 单条显式提交、单次处理、六次有界投递、DLQ 单元边界及串行持续处理入口已验证
+- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 显式提交、六次有界投递、DLQ、串行入口及真实 Kafka→Elasticsearch/DLQ 小载荷联动已验证
 - 更新日期：2026-08-04
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
@@ -159,10 +159,13 @@ DLQ 写入后的源位点确认；多记录或多分区连续前缀、退避和�
 - `delivery_test.go`：精确验证六次尝试、五次等待、抖动闭区间、取消优先、预算
   耗尽，以及提交响应丢失后完整重放并由稳定 `_id` 收敛；
 - `processor_integration_test.go`：使用真实 Kafka Poll 记录和受控 Elasticsearch
-  writer，验证 pipeline 提交的仍是携带私有身份令牌的原始记录。
+  writer，验证 pipeline 提交的仍是携带私有身份令牌的原始记录；
 - `runner.go` 与 `runner_test.go`：严格串行执行 Poll、单记录有界投递和必要的
   DLQ 隔离；只有正常投递已提交，或 DLQ 发布与源提交均确认后，才拉取下一条
-  记录，其他故障立即停止且不越过待确认位点。
+  记录，其他故障立即停止且不越过待确认位点；
+- `runner_integration_test.go`：使用真实 Kafka Consumer、Elasticsearch Client 和
+  DLQ Producer 处理“有效→永久无效→有效”，核对两个稳定文档 ID、DLQ envelope
+  原文与源组最终位点，测试停止接缝不替换任何外部依赖。
 
 Elasticsearch 写入和 Kafka 提交拥有独立的正数超时。提交失败时 Elasticsearch
 可能已经持久化文档，因此结果明确为 `commit_failure`；同一记录重放时再由稳定
@@ -415,8 +418,10 @@ digest。
    并行启动全部资源关闭。
 3. 集成：Go 客户端直连真实 Elasticsearch 的首次 `create`、重复 `_id` 和唯一
    计数已通过；Go 客户端对真实 Kafka 4.3.1 的未确认重读、显式提交和同组重启
-   续读及 pipeline 原始记录身份提交已通过；真实 Kafka DLQ 写入、源位点联动和
-   毒消息后继续处理，以及真实 Elasticsearch 处理器联动仍待验证。
+   续读及 pipeline 原始记录身份提交已通过；真实 Runner 还以单分区小载荷证明
+   两条有效记录写入 Elasticsearch、永久无效记录写入真实 `logs.dlq` 后提交源
+   offset 1，并继续处理 offset 2，最终源组提交点为 3。重复投递、真实故障恢复、
+   rebalance 和多分区连续前缀仍待验证。
 4. 端到端：Filebeat 按 Kafka 有界位点验证两个演示服务的唯一 `test_run_id`、
    Pod UID key、原始消息和主题隔离；元数据失效 fixture 验证未分类路径指纹。
    完整链路后续继续验证数据最终可在 Grafana 中查看。
