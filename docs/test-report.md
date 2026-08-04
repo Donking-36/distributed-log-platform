@@ -678,6 +678,46 @@ count=1
 测试结束后临时索引查询为空，Elasticsearch Pod 仍 Ready、0 重启，集群 green。
 `go test -race -cover ./internal/elasticsearch` 通过，语句覆盖率为 86.8%。
 
+### Go Kafka 单条消费与显式提交边界
+
+2026-08-04 固定官方纯 Go 客户端 `github.com/twmb/franz-go v1.21.5`；其模块要求
+Go 1.25，项目 Go 1.26.5 满足。`internal/kafka` 校验 Broker、消费者组和主题，
+固定关闭自动提交、阻止处理期间重平衡、新组从起始位点消费，并使用
+`PollRecords(ctx, 1)` 把单次待处理范围限制为一条记录。
+
+业务层只看到复制后的 topic、partition、offset、key 和 value。只有当前消费者
+返回的唯一待确认记录可以交给同步 `CommitRecords`；提交成功后才清除待确认
+状态并允许重平衡，提交失败保留记录供重试。取消、空拉取和 fetch 错误会解除
+可能的阻塞，`CloseAllowingRebalance` 关闭时不提交位点。单元测试还覆盖跨消费者、
+伪造、重复提交，以及同一 fetch 同时含记录和分区错误时不丢记录。
+
+`go test -race ./internal/kafka` 与 `go test -cover ./internal/kafka` 通过，语句覆盖率
+为 83.3%。随后执行 `make kafka-consumer-integration`，在 Kafka 4.3.1 上创建唯一
+单分区临时主题并写入两条受控记录。最终证据为：
+
+```text
+run_id=20260804t043449z-265233
+topic=logs.integration.kafka-consumer.20260804t043449z-265233
+topic_id=cUGmij9MQ2ujTwaJH640MA
+group=integration.log-processor.20260804t043449z-265233
+first_value=kafka-consumer-20260804t043449z-265233-first
+second_value=kafka-consumer-20260804t043449z-265233-second
+first_offset=0
+repeated_offset=0
+resumed_offset=1
+committed_next_offset=2
+```
+
+消费者 A 拉取 offset 0 后不提交并关闭；同组消费者 B 再次读到 offset 0，证明
+关闭和等待期间没有自动提交。B 显式确认后关闭，同组消费者 C 首次读到 offset 1；
+C 确认后，Broker 上该组的提交点为 2。测试退出后，临时 topic、consumer group、
+Pod 内测试二进制和本地编译目录均不存在，四个项目主题未被用作 fixture。
+
+这只证明 Kafka 4.3.1 上单分区、单记录、无并发的最小消费/提交/续读语义；尚未
+覆盖多记录或多分区的连续前缀、真实 rebalance 与分区撤销、提交失败或响应丢失、
+Kafka 结果与 Elasticsearch `created`/`duplicate` 的联动确认、六次有界退避、
+DLQ、完整处理循环、健康接口、部署及端到端恢复。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -685,6 +725,7 @@ count=1
 Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的有界故障窗口内，
 同一 PVC 上故障前位点连续可读并继续推进，新产生的 40 条日志恢复后完整投递。
 它不代表多节点故障转移、任意长中断、队列饱和、节点磁盘丢失、TLS/SASL 或
-生产容量；Elasticsearch 服务端和 Go Bulk 写入边界已经覆盖，但尚未覆盖 Kafka
-拉取、连续前缀位点提交、真正的六次退避、DLQ、重平衡、健康接口、处理器部署、
+生产容量；Elasticsearch 服务端、Go Bulk 写入和 Kafka 单条显式提交边界已经覆盖，
+但尚未覆盖 Kafka→Elasticsearch 结果联动、多记录/多分区连续前缀位点推进、
+真实重平衡、提交失败或响应丢失、真正的六次退避、DLQ、健康接口、处理器部署、
 端到端恢复以及 Grafana 查询链路。

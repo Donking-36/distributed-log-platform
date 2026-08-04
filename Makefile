@@ -25,6 +25,8 @@ ACCEPTANCE_RUN_ID ?=
 ACCEPTANCE_TIMEOUT ?= 60s
 KAFKA_ROLLOUT_TIMEOUT ?= 300s
 KAFKA_TOPIC_INIT_TIMEOUT ?= 300s
+KAFKA_CONSUMER_INTEGRATION_TIMEOUT ?= 90s
+KAFKA_CONSUMER_TEST_RUN_ID ?=
 ELASTICSEARCH_ROLLOUT_TIMEOUT ?= 300s
 FILEBEAT_NAMESPACE ?= stage3-collector
 FILEBEAT_ROLLOUT_TIMEOUT ?= 180s
@@ -61,6 +63,7 @@ override EXPECTED_ELASTICSEARCH_CONFIG_DIGEST := sha256:d3e5c642b3f9082731ab9e3a
 export MINIKUBE KUBECTL KUBE_CONTEXT KUBE_NAMESPACE KAFKA_NODE_IMAGE
 export EXPECTED_KAFKA_MANIFEST_DIGEST EXPECTED_KAFKA_CONFIG_DIGEST
 export KUSTOMIZE_KAFKA_TOPICS_OVERLAY KAFKA_TOPIC_INIT_TIMEOUT
+export KAFKA_CONSUMER_INTEGRATION_TIMEOUT KAFKA_CONSUMER_TEST_RUN_ID
 export DOCKER KUSTOMIZE_FILEBEAT_OVERLAY FILEBEAT_NAMESPACE FILEBEAT_ROLLOUT_TIMEOUT FILEBEAT_LOCAL_IMAGE
 export FILEBEAT_ACCEPTANCE_TIMEOUT FILEBEAT_ACCEPTANCE_SETTLE_SECONDS FILEBEAT_ACCEPTANCE_MAX_RECORDS FILEBEAT_VERSION
 export FILEBEAT_FALLBACK_TIMEOUT FILEBEAT_RECOVERY_TIMEOUT FILEBEAT_RECOVERY_SETTLE_SECONDS
@@ -74,6 +77,7 @@ export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGE
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
 	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status k8s-kafka-topics-render \
 	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test \
+	kafka-consumer-integration \
 	k8s-elasticsearch-render k8s-elasticsearch-validate k8s-elasticsearch-image-check \
 	k8s-elasticsearch-runtime-check k8s-elasticsearch-deploy k8s-elasticsearch-status k8s-elasticsearch-template \
 	filebeat-config-check k8s-filebeat-render k8s-filebeat-validate k8s-filebeat-image-check \
@@ -130,6 +134,10 @@ build:
 # kafka-topic-initializer-test 纯本地验证 Kafka 4.3.1 文本解析的正反例，不连接集群。
 kafka-topic-initializer-test:
 	@bash deploy/kubernetes/base/kafka-topics/initialize-topics.sh self-test
+
+# kafka-consumer-integration 在真实 Kafka 4.3.1 上验证未提交重投和显式提交续读，并清理唯一临时资源。
+kafka-consumer-integration: version-check k8s-context-check
+	@scripts/run-kafka-consumer-integration.sh
 
 # image 只允许开发标签或干净工作区的当前提交短 SHA，避免产生来源不明的镜像。
 image:

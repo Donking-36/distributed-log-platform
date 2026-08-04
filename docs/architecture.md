@@ -1,6 +1,6 @@
 # 架构
 
-- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端基线与 Go Bulk 写入边界已验证
+- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入及 Kafka 单条显式提交边界已验证
 - 更新日期：2026-08-04
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
@@ -113,9 +113,26 @@ Elasticsearch 写入已经构成第二个稳定外部边界，因此放入
 进入 Elasticsearch 前识别。客户端不执行重试、退避、Kafka 位点提交或 DLQ
 写入，后续处理器统一拥有这些投递策略。
 
+Kafka 消费已经构成第三个稳定外部边界，因此放入 `internal/kafka`，不把客户端
+类型和位点规则混入未来的处理循环：
+
+- `config.go` 与 `config_test.go`：校验 Broker、消费者组和主题，固定
+  `DisableAutoCommit`、`BlockRebalanceOnPoll`、新组从起始位点消费以及
+  `franz-go v1.21.5` 选项；
+- `record.go`：复制并暴露 topic、partition、offset、key 和 value，通过不导出的
+  令牌阻止伪造、跨消费者或重复提交；
+- `consumer.go` 与 `consumer_test.go`：`PollRecords(ctx, 1)` 一次只建立一条待确认
+  记录，只有同步 `CommitRecords` 成功后才清除该状态并允许重平衡；失败可重试
+  同一记录，关闭使用 `CloseAllowingRebalance` 且绝不隐式提交。
+
+拉取取消、空结果或 fetch 错误都会先解除可能的重平衡阻塞；同一 fetch 同时包含
+记录和分区错误时，记录不会被丢弃，错误会在处理当前记录后的下一次拉取返回。
+这个包只拥有传输和提交边界，不决定事件是否合法、Elasticsearch 结果能否确认、
+多记录或多分区的连续前缀、退避、DLQ 和健康状态。
+
 Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
-只表示 Filebeat 补充的源文件 `log.offset`。Kafka 消费者、处理器配置和进程入口
-只在对应职责实现时再建立，不预建空包。
+只表示 Filebeat 补充的源文件 `log.offset`。处理器配置和进程入口只在对应职责
+实现时再建立，不预建空包。
 
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。
@@ -303,7 +320,7 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | Filebeat 镜像 | 已验证：`docker.elastic.co/beats/filebeat-wolfi:9.4.4@sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca` | 上游 linux/amd64 manifest `sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379`；节点转换后 manifest/config 为 `sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9` / `sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf`；Kafka 客户端协议固定为 Filebeat 支持的 `4.1.0` 并连接 Kafka 4.3.1；配置、运行时 imageID、正常/兜底路由、registry Pod 重建和有界 Kafka 短停恢复门禁均通过 |
 | Elasticsearch 镜像 | 已验证：Elastic Team 维护的 Docker Official Image `docker.io/library/elasticsearch:9.4.4@sha256:7de2137b43d9f263cffe51f139a9f3144da7b9941de615fb4317fc539f4d16a7` | linux/amd64 清单摘要 `sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c`；节点旁加载后的 manifest/config 为 `sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677` / `sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640`；版本/健康、Restricted 运行时、模板映射和 Bulk `create` 201/重复 409 冒烟通过；仅为关闭安全的本地单节点基线 |
 | Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
-| Go Kafka 客户端 | 待定 | 仅在 Kafka 协议冒烟测试通过后选定，并记录理由 |
+| Go Kafka 客户端 | 已验证：`github.com/twmb/franz-go v1.21.5` | 模块要求 Go 1.25，当前 Go 1.26.5 满足；关闭自动提交，Kafka 4.3.1 上的单条消费、显式提交、未确认重读及同组重启续读通过；不代表完整 4.3 协议、并发或重平衡验证 |
 | Go Elasticsearch 客户端 | 已验证：`github.com/elastic/go-elasticsearch/v9 v9.4.2` | 使用 `elastic-transport-go/v8 v8.9.0` 配置官方 transport；显式关闭内置重试，由后续处理器统一执行 ADR-002 的有界退避；14 字段转换、逐项错误分支和 Elasticsearch 9.4.4 首次 201/重复 409/唯一计数 1 冒烟通过 |
 
 “待定”不是可部署版本。任何清单都不得使用 `latest`。每个镜像选定后，
@@ -334,9 +351,11 @@ digest。
    资源边界与服务端准入、Filebeat 固定镜像配置正反例和十一项 Kafka 校验器单测、
    Grafana 自动配置验证。
 2. 单元：解析、必填字段、级别规范化、确定性 ID、14 字段文档、Bulk NDJSON、
-   逐项结果和请求级错误分类。
+   逐项结果、请求级错误分类，以及 Kafka 配置、单条待确认状态、错误提交和关闭
+   不提交语义。
 3. 集成：Go 客户端直连真实 Elasticsearch 的首次 `create`、重复 `_id` 和唯一
-   计数已通过；一条 Kafka 记录对应一个 Elasticsearch 文档仍需处理器链路验证。
+   计数已通过；Go 客户端对真实 Kafka 4.3.1 的未确认重读、显式提交和同组重启
+   续读已通过；一条 Kafka 记录对应一个 Elasticsearch 文档仍需处理器链路验证。
 4. 端到端：Filebeat 按 Kafka 有界位点验证两个演示服务的唯一 `test_run_id`、
    Pod UID key、原始消息和主题隔离；元数据失效 fixture 验证未分类路径指纹。
    完整链路后续继续验证数据最终可在 Grafana 中查看。
