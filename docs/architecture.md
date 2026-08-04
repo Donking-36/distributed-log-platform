@@ -1,6 +1,6 @@
 # 架构
 
-- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 单条显式提交、单次处理、六次有界投递周期及永久无效记录 DLQ 发布与源位点确认单元边界已验证
+- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 单条显式提交、单次处理、六次有界投递、DLQ 单元边界及串行持续处理入口已验证
 - 更新日期：2026-08-04
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
@@ -90,7 +90,7 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 `internal/`。
 
 `log-processor` 的 Filebeat 双层事件契约已经构成稳定领域边界，因此先放入
-`internal/event`，不堆入未来的 `cmd/log-processor/main.go`：
+`internal/event`，不堆入命令入口：
 
 - `event.go`：规范事件和可由 `errors.Is` 分类的永久校验错误；
 - `filebeat.go` 与 `filebeat_test.go`：解析 Filebeat 外层 JSON 及其 `message`
@@ -104,7 +104,7 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 也不会作为额外字段写入 Elasticsearch，避免领域标识材料泄漏到存储模型。
 
 Elasticsearch 写入已经构成第二个稳定外部边界，因此放入
-`internal/elasticsearch`，不与未来的消费循环或入口生命周期混合：
+`internal/elasticsearch`，不与持续消费循环或入口生命周期混合：
 
 - `document.go` 与 `document_test.go`：把规范事件转换为不可变的 14 字段文档，
   保证 Bulk `_id` 与文档 `event_id` 使用同一个确定性值；
@@ -119,7 +119,7 @@ Elasticsearch 写入已经构成第二个稳定外部边界，因此放入
 写入，后续处理器统一拥有这些投递策略。
 
 Kafka 消费已经构成第三个稳定外部边界，因此放入 `internal/kafka`，不把客户端
-类型和位点规则混入未来的处理循环：
+类型和位点规则混入持续处理编排：
 
 - `config.go` 与 `config_test.go`：校验 Broker、消费者组和主题，固定
   `DisableAutoCommit`、`BlockRebalanceOnPoll`、新组从起始位点消费以及
@@ -139,7 +139,7 @@ Kafka 消费已经构成第三个稳定外部边界，因此放入 `internal/kaf
 DLQ 写入后的源位点确认；多记录或多分区连续前缀、退避和健康状态也不属于这里。
 
 单条记录的确认策略已经成为三个稳定边界之间的编排职责，因此放入
-`internal/pipeline`，沿用阶段计划中的既有术语，而不堆入未来的
+`internal/pipeline`，沿用阶段计划中的既有术语，而不堆入
 `cmd/log-processor/main.go`：
 
 - `result.go`：区分端到端 `created`/`duplicate`、永久无效、可重试、系统故障、
@@ -160,17 +160,34 @@ DLQ 写入后的源位点确认；多记录或多分区连续前缀、退避和�
   耗尽，以及提交响应丢失后完整重放并由稳定 `_id` 收敛；
 - `processor_integration_test.go`：使用真实 Kafka Poll 记录和受控 Elasticsearch
   writer，验证 pipeline 提交的仍是携带私有身份令牌的原始记录。
+- `runner.go` 与 `runner_test.go`：严格串行执行 Poll、单记录有界投递和必要的
+  DLQ 隔离；只有正常投递已提交，或 DLQ 发布与源提交均确认后，才拉取下一条
+  记录，其他故障立即停止且不越过待确认位点。
 
 Elasticsearch 写入和 Kafka 提交拥有独立的正数超时。提交失败时 Elasticsearch
 可能已经持久化文档，因此结果明确为 `commit_failure`；同一记录重放时再由稳定
 `_id` 的 409 收敛。`Processor` 只表达一次尝试，`DeliveryCycle` 才拥有 ADR-002
 固定的单记录重试预算。pipeline 目前只拥有单条永久无效记录的 DLQ 编排，不拥有
-Poll 循环、DLQ 重试、客户端关闭、健康状态或多分区连续前缀；`Processor` 和
-`DeliveryCycle` 尚未自动调用 `DeadLetterHandler`。
+DLQ 重试、客户端关闭、健康状态或并发多分区调度；`Runner` 负责把现有边界连接成
+最小串行循环，不引入 goroutine 消费或批量位点推进。
 
 Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
-只表示 Filebeat 补充的源文件 `log.offset`。进程环境配置和组合根只在建立
-`cmd/log-processor` 时实现，不预建空入口。
+只表示 Filebeat 补充的源文件 `log.offset`。
+
+`cmd/log-processor` 只保留命令级职责，并按文件拆分：
+
+- `config.go` 与 `config_test.go`：读取、规范化并校验 Broker、消费者组、源主题、
+  Elasticsearch 地址/索引和三个独立超时；拒绝重复成员、空成员和订阅
+  `logs.dlq`，避免死信循环；
+- `app.go` 与 `app_test.go`：按 Consumer→Elasticsearch→DLQ Producer→Processor
+  →DeliveryCycle→DeadLetterHandler→Runner 的顺序组装真实依赖。启动中途失败会
+  清理已创建资源；退出时并行启动三个资源的关闭，使 Kafka 离组阻塞不会阻止
+  DLQ 与 Elasticsearch 清理，统一等待受 10 秒预算约束；
+- `main.go` 与 `main_test.go`：建立 SIGINT/SIGTERM context、结构化日志和退出码，
+  区分正常信号取消与意外取消，并保证运行失败后仍执行独立的有界关闭。
+
+命令入口不重复实现解析、重试、DLQ 或位点规则；健康接口、容器和 Kubernetes
+部署仍是后续纵向切片。
 
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。
@@ -208,7 +225,7 @@ UC-001/UC-002 验收链路全绿之后。
   安全上下文运行。请求 500m CPU/2 GiB，限制 1500m CPU/2 GiB，固定 1 GiB 堆。
 - 本地 overlay 关闭安全并设置 `node.store.allow_mmap=false`，前者只允许隔离的
   Minikube，后者避免用特权 initContainer 修改宿主 sysctl；两项都不是生产建议。
-- `log-processor`：配置就绪/存活探针、资源请求/限制、优雅终止，并以非根
+- 计划部署的 `log-processor`：配置就绪/存活探针、资源请求/限制、优雅终止，并以非根
   用户运行。
 - `log-producer`：配置资源请求/限制、安全上下文和优雅终止。它没有 Service
   或流量入口，进程退出已由 kubelet 感知，因此不添加固定成功、`kill -0 1`
@@ -393,6 +410,9 @@ digest。
    不提交语义；单记录处理还验证六次尝试、五级全抖动上限、提交失败重放、预算
    耗尽和等待取消。DLQ 单元边界还验证 schema v1、稳定源坐标 key、任意字节
    Base64 往返、安全错误摘要、发布确认后才提交，以及发布失败或取消时不提交。
+   串行 Runner 还验证当前记录未解决时不继续 Poll、永久无效记录的 DLQ 顺序和
+   启动前取消；命令入口覆盖配置反例、信号取消、运行/关闭错误保留和统一预算内
+   并行启动全部资源关闭。
 3. 集成：Go 客户端直连真实 Elasticsearch 的首次 `create`、重复 `_id` 和唯一
    计数已通过；Go 客户端对真实 Kafka 4.3.1 的未确认重读、显式提交和同组重启
    续读及 pipeline 原始记录身份提交已通过；真实 Kafka DLQ 写入、源位点联动和
