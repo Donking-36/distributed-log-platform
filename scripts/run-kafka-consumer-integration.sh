@@ -11,11 +11,16 @@ KAFKA_CONSUMER_TEST_RUN_ID="${KAFKA_CONSUMER_TEST_RUN_ID:-}"
 
 readonly KAFKA_POD="kafka-0"
 readonly KAFKA_CONTAINER="kafka"
+readonly ELASTICSEARCH_POD="elasticsearch-0"
+readonly ELASTICSEARCH_CONTAINER="elasticsearch"
 readonly BOOTSTRAP_SERVER="localhost:9092"
+readonly ELASTICSEARCH_SERVICE_URL="http://elasticsearch:9200"
+readonly ELASTICSEARCH_LOCAL_URL="http://127.0.0.1:9200"
 readonly TOPICS_CLI="/opt/kafka/bin/kafka-topics.sh"
 readonly PRODUCER_CLI="/opt/kafka/bin/kafka-console-producer.sh"
 readonly GROUPS_CLI="/opt/kafka/bin/kafka-consumer-groups.sh"
 readonly OFFSETS_CLI="/opt/kafka/bin/kafka-get-offsets.sh"
+readonly DLQ_TOPIC="logs.dlq"
 readonly KAFKA_CLI_HEAP_OPTS="-Xms32m -Xmx128m"
 
 fail() {
@@ -37,8 +42,15 @@ readonly RUN_ID="${KAFKA_CONSUMER_TEST_RUN_ID}"
 readonly TOPIC="logs.integration.kafka-consumer.${RUN_ID}"
 readonly GROUP_ID="integration.log-processor.${RUN_ID}"
 readonly PIPELINE_GROUP_ID="integration.log-pipeline.${RUN_ID}"
-readonly FIRST_VALUE='{"message":"{\"@timestamp\":\"2026-08-04T04:00:00Z\",\"event.sequence\":1,\"log.level\":\"INFO\",\"message\":\"pipeline integration first\",\"service.name\":\"api-service\",\"test_run_id\":\"pipeline-integration\"}","kubernetes":{"namespace":"stage3-logs","labels":{"service":"api-service"},"pod":{"name":"api-service-integration","uid":"pod-uid-pipeline-integration"}},"container":{"id":"container-id-pipeline-integration"},"log":{"offset":100,"file":{"path":"/var/log/containers/api-service-integration.log"}}}'
-readonly SECOND_VALUE='{"message":"{\"@timestamp\":\"2026-08-04T04:00:01Z\",\"event.sequence\":2,\"log.level\":\"WARN\",\"message\":\"pipeline integration second\",\"service.name\":\"api-service\",\"test_run_id\":\"pipeline-integration\"}","kubernetes":{"namespace":"stage3-logs","labels":{"service":"api-service"},"pod":{"name":"api-service-integration","uid":"pod-uid-pipeline-integration"}},"container":{"id":"container-id-pipeline-integration"},"log":{"offset":101,"file":{"path":"/var/log/containers/api-service-integration.log"}}}'
+readonly RUNNER_GROUP_ID="integration.log-runner.${RUN_ID}"
+readonly RUNNER_INDEX="logs-stage3-runner-integration-${RUN_ID}"
+readonly TEST_RUN_ID="runner-integration-${RUN_ID}"
+readonly FIRST_VALUE_TEMPLATE='{"message":"{\"@timestamp\":\"2026-08-04T04:00:00Z\",\"event.sequence\":1,\"log.level\":\"INFO\",\"message\":\"runner integration first\",\"service.name\":\"api-service\",\"test_run_id\":\"__TEST_RUN_ID__\"}","kubernetes":{"namespace":"stage3-logs","labels":{"service":"api-service"},"pod":{"name":"api-service-integration","uid":"pod-uid-runner-integration"}},"container":{"id":"container-id-runner-integration"},"log":{"offset":100,"file":{"path":"/var/log/containers/api-service-integration.log"}}}'
+readonly SECOND_VALUE_TEMPLATE='{"message":"{\"@timestamp\":\"2026-08-04T04:00:01Z\",\"event.sequence\":2,\"log.level\":\"WARN\",\"message\":\"runner integration invalid\",\"service.name\":\"worker-service\",\"test_run_id\":\"__TEST_RUN_ID__\"}","kubernetes":{"namespace":"stage3-logs","labels":{"service":"api-service"},"pod":{"name":"api-service-integration","uid":"pod-uid-runner-integration"}},"container":{"id":"container-id-runner-integration"},"log":{"offset":101,"file":{"path":"/var/log/containers/api-service-integration.log"}}}'
+readonly THIRD_VALUE_TEMPLATE='{"message":"{\"@timestamp\":\"2026-08-04T04:00:02Z\",\"event.sequence\":3,\"log.level\":\"ERROR\",\"message\":\"runner integration third\",\"service.name\":\"api-service\",\"test_run_id\":\"__TEST_RUN_ID__\"}","kubernetes":{"namespace":"stage3-logs","labels":{"service":"api-service"},"pod":{"name":"api-service-integration","uid":"pod-uid-runner-integration"}},"container":{"id":"container-id-runner-integration"},"log":{"offset":102,"file":{"path":"/var/log/containers/api-service-integration.log"}}}'
+readonly FIRST_VALUE="${FIRST_VALUE_TEMPLATE//__TEST_RUN_ID__/${TEST_RUN_ID}}"
+readonly SECOND_VALUE="${SECOND_VALUE_TEMPLATE//__TEST_RUN_ID__/${TEST_RUN_ID}}"
+readonly THIRD_VALUE="${THIRD_VALUE_TEMPLATE//__TEST_RUN_ID__/${TEST_RUN_ID}}"
 readonly REMOTE_BINARY="/tmp/kafka-consumer-integration-${RUN_ID}.test"
 readonly REMOTE_PIPELINE_BINARY="/tmp/kafka-pipeline-integration-${RUN_ID}.test"
 
@@ -46,7 +58,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 cd "${repo_root}"
 
-for command_name in "${KUBECTL}" go grep awk mktemp; do
+for command_name in "${KUBECTL}" go grep awk mktemp timeout; do
   command -v "${command_name}" >/dev/null 2>&1 || fail "缺少命令：${command_name}"
 done
 
@@ -62,6 +74,14 @@ pod_facts="$(${KUBECTL} \
 [[ "${pod_facts}" == "${KAFKA_POD}|Running|true" ]] ||
   fail "Kafka Pod 尚未就绪：${pod_facts:-缺失}"
 "${repo_root}/scripts/verify-kafka-image.sh" pod
+
+elasticsearch_pod_facts="$(${KUBECTL} \
+  --context="${KUBE_CONTEXT}" \
+  get pod "${ELASTICSEARCH_POD}" \
+  -n "${KUBE_NAMESPACE}" \
+  -o 'jsonpath={.metadata.name}{"|"}{.status.phase}{"|"}{.status.containerStatuses[?(@.name=="elasticsearch")].ready}')"
+[[ "${elasticsearch_pod_facts}" == "${ELASTICSEARCH_POD}|Running|true" ]] ||
+  fail "Elasticsearch Pod 尚未就绪：${elasticsearch_pod_facts:-缺失}"
 
 kafka_exec() {
   "${KUBECTL}" \
@@ -90,6 +110,43 @@ kafka_exec_stdin() {
     "KAFKA_HEAP_OPTS=${KAFKA_CLI_HEAP_OPTS}" \
     "KAFKA_GC_LOG_OPTS=" \
     "$@"
+}
+
+elasticsearch_exec() {
+  timeout 15s "${KUBECTL}" \
+    --context="${KUBE_CONTEXT}" \
+    exec \
+    -n "${KUBE_NAMESPACE}" \
+    -c "${ELASTICSEARCH_CONTAINER}" \
+    "${ELASTICSEARCH_POD}" \
+    -- \
+    "$@"
+}
+
+elasticsearch_status() {
+  local method="$1" method_option
+  local index="$2"
+  case "${method}" in
+    HEAD)
+      method_option="--head"
+      ;;
+    DELETE)
+      method_option="--request=DELETE"
+      ;;
+    *)
+      echo "不支持的 Elasticsearch HTTP 方法：${method}" >&2
+      return 2
+      ;;
+  esac
+  elasticsearch_exec \
+    curl \
+    --silent \
+    --show-error \
+    --max-time 10 \
+    --output /dev/null \
+    --write-out '%{http_code}' \
+    "${method_option}" \
+    "${ELASTICSEARCH_LOCAL_URL}/${index}"
 }
 
 exact_topic_regex() {
@@ -146,9 +203,20 @@ remote_binary_state() {
     "${remote_path}"
 }
 
+partition_end_offset() {
+  local topic="$1"
+  local partition="$2"
+  kafka_exec \
+    "${OFFSETS_CLI}" \
+    --bootstrap-server "${BOOTSTRAP_SERVER}" \
+    --topic "$(exact_topic_regex "${topic}")" |
+    awk -F ':' -v topic="${topic}" -v partition="${partition}" \
+      '$1 == topic && $2 == partition { print $3 }'
+}
+
 existing_topic="$(topic_description)"
 [[ -z "${existing_topic}" ]] || fail "临时 Kafka topic 已存在，拒绝复用：${TOPIC}"
-for candidate_group_id in "${GROUP_ID}" "${PIPELINE_GROUP_ID}"; do
+for candidate_group_id in "${GROUP_ID}" "${PIPELINE_GROUP_ID}" "${RUNNER_GROUP_ID}"; do
   existing_group_state="$(group_state "${candidate_group_id}")"
   if [[ "${existing_group_state}" == "exists" ]]; then
     fail "临时 Kafka consumer group 已存在，拒绝复用：${candidate_group_id}"
@@ -162,6 +230,15 @@ for candidate_remote_binary in "${REMOTE_BINARY}" "${REMOTE_PIPELINE_BINARY}"; d
   [[ "${existing_remote_binary_state}" == "absent" ]] ||
     fail "临时测试二进制路径已存在，拒绝覆盖：${candidate_remote_binary}"
 done
+
+runner_index_status="$(elasticsearch_status HEAD "${RUNNER_INDEX}")"
+[[ "${runner_index_status}" == "404" ]] ||
+  fail "Runner 临时 Elasticsearch 索引已存在或状态异常：${RUNNER_INDEX} HTTP ${runner_index_status}"
+runner_index_owned=true
+
+dlq_start_offset="$(partition_end_offset "${DLQ_TOPIC}" 0)"
+[[ "${dlq_start_offset}" =~ ^[0-9]+$ ]] ||
+  fail "无法读取 ${DLQ_TOPIC}/0 的初始末端位点：${dlq_start_offset:-缺失}"
 
 umask 077
 work_dir="$(mktemp -d)"
@@ -214,6 +291,31 @@ cleanup_group() {
   fi
 }
 
+cleanup_runner_index() {
+  local current_status delete_status
+  if ! current_status="$(elasticsearch_status HEAD "${RUNNER_INDEX}")"; then
+    echo "无法查询 Runner 集成测试临时索引：${RUNNER_INDEX}" >&2
+    cleanup_failed=true
+  elif [[ "${current_status}" == "404" ]]; then
+    return
+  elif [[ "${current_status}" != "200" ]]; then
+    echo "Runner 集成测试临时索引状态异常：${RUNNER_INDEX} HTTP ${current_status}" >&2
+    cleanup_failed=true
+  elif ! delete_status="$(elasticsearch_status DELETE "${RUNNER_INDEX}")"; then
+    echo "清理 Runner 集成测试临时索引失败：${RUNNER_INDEX}" >&2
+    cleanup_failed=true
+  elif [[ "${delete_status}" != "200" ]]; then
+    echo "清理 Runner 集成测试临时索引返回 HTTP ${delete_status}：${RUNNER_INDEX}" >&2
+    cleanup_failed=true
+  elif ! current_status="$(elasticsearch_status HEAD "${RUNNER_INDEX}")"; then
+    echo "无法复核 Runner 集成测试临时索引：${RUNNER_INDEX}" >&2
+    cleanup_failed=true
+  elif [[ "${current_status}" != "404" ]]; then
+    echo "Runner 集成测试临时索引删除后仍存在：${RUNNER_INDEX}" >&2
+    cleanup_failed=true
+  fi
+}
+
 cleanup() {
   local exit_code=$?
   local cleanup_failed=false
@@ -232,6 +334,10 @@ cleanup() {
 
   cleanup_group "${GROUP_ID}"
   cleanup_group "${PIPELINE_GROUP_ID}"
+  cleanup_group "${RUNNER_GROUP_ID}"
+  if [[ "${runner_index_owned}" == "true" ]]; then
+    cleanup_runner_index
+  fi
 
   if [[ "${topic_create_attempted}" == "true" ]]; then
     if ! current_description="$(topic_description)"; then
@@ -287,7 +393,7 @@ cleanup() {
     exit_code=1
   fi
   if [[ "${exit_code}" -eq 0 ]]; then
-    echo "Kafka 集成测试临时资源清理通过：topic、consumer groups、测试二进制均不存在"
+    echo "Runner 集成测试临时资源清理通过：topic、consumer groups、Elasticsearch 索引、测试二进制均不存在"
   fi
   exit "${exit_code}"
 }
@@ -315,19 +421,15 @@ topic_id="$(topic_id_from_description <<<"${created_description}")"
 [[ "$(grep -c $'Partition: 0' <<<"${created_description}")" -eq 1 ]] ||
   fail "临时 Kafka topic 分区明细异常"
 
-printf '%s\n%s\n' "${FIRST_VALUE}" "${SECOND_VALUE}" |
+printf '%s\n%s\n%s\n' "${FIRST_VALUE}" "${SECOND_VALUE}" "${THIRD_VALUE}" |
   kafka_exec_stdin \
     "${PRODUCER_CLI}" \
     --bootstrap-server "${BOOTSTRAP_SERVER}" \
     --topic "${TOPIC}" \
     --command-property acks=all
 
-end_offset="$(kafka_exec \
-  "${OFFSETS_CLI}" \
-  --bootstrap-server "${BOOTSTRAP_SERVER}" \
-  --topic "$(exact_topic_regex "${TOPIC}")" |
-  awk -F ':' -v topic="${TOPIC}" '$1 == topic && $2 == "0" { print $3 }')"
-[[ "${end_offset}" == "2" ]] || fail "测试记录末端位点 = ${end_offset:-缺失}，期望 2"
+end_offset="$(partition_end_offset "${TOPIC}" 0)"
+[[ "${end_offset}" == "3" ]] || fail "测试记录末端位点 = ${end_offset:-缺失}，期望 3"
 
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test \
   -c \
@@ -383,6 +485,23 @@ kafka_exec \
   -test.run '^TestProcessorCommitsOriginalKafkaRecord$' \
   -test.timeout "${TIMEOUT_SECONDS}s"
 
+kafka_exec \
+  env \
+  "KAFKA_TEST_BROKERS=${BOOTSTRAP_SERVER}" \
+  "KAFKA_TEST_TOPIC=${TOPIC}" \
+  "KAFKA_RUNNER_GROUP_ID=${RUNNER_GROUP_ID}" \
+  "KAFKA_TEST_FIRST_VALUE=${FIRST_VALUE}" \
+  "KAFKA_TEST_SECOND_VALUE=${SECOND_VALUE}" \
+  "KAFKA_TEST_THIRD_VALUE=${THIRD_VALUE}" \
+  "KAFKA_DLQ_START_OFFSET=${dlq_start_offset}" \
+  "RUNNER_TEST_RUN_ID=${TEST_RUN_ID}" \
+  "ELASTICSEARCH_URL=${ELASTICSEARCH_SERVICE_URL}" \
+  "ELASTICSEARCH_TEST_INDEX=${RUNNER_INDEX}" \
+  "${REMOTE_PIPELINE_BINARY}" \
+  -test.v \
+  -test.run '^TestRunnerProcessesValidInvalidValidAgainstRealServices$' \
+  -test.timeout "${TIMEOUT_SECONDS}s"
+
 group_description="$(kafka_exec \
   "${GROUPS_CLI}" \
   --bootstrap-server "${BOOTSTRAP_SERVER}" \
@@ -409,4 +528,23 @@ pipeline_committed_offset="$(awk \
 [[ "${pipeline_committed_offset}" == "1" ]] ||
   fail "pipeline consumer group 已提交下一位点 = ${pipeline_committed_offset:-缺失}，期望 1"
 
-echo "Kafka 4.3.1 消费与 pipeline token 验证通过：run_id=${RUN_ID} topic_id=${topic_id} consumer_next=2 pipeline_next=1"
+runner_group_description="$(kafka_exec \
+  "${GROUPS_CLI}" \
+  --bootstrap-server "${BOOTSTRAP_SERVER}" \
+  --describe \
+  --group "${RUNNER_GROUP_ID}")"
+runner_committed_offset="$(awk \
+  -v group="${RUNNER_GROUP_ID}" \
+  -v topic="${TOPIC}" \
+  '$1 == group && $2 == topic && $3 == "0" { print $4 }' \
+  <<<"${runner_group_description}")"
+[[ "${runner_committed_offset}" == "3" ]] ||
+  fail "Runner consumer group 已提交下一位点 = ${runner_committed_offset:-缺失}，期望 3"
+
+dlq_end_offset="$(partition_end_offset "${DLQ_TOPIC}" 0)"
+expected_dlq_end_offset="$((dlq_start_offset + 1))"
+[[ "${dlq_end_offset}" == "${expected_dlq_end_offset}" ]] ||
+  fail "${DLQ_TOPIC}/0 末端位点 = ${dlq_end_offset:-缺失}，期望 ${expected_dlq_end_offset}"
+
+echo "真实 Runner 链路验证通过：run_id=${RUN_ID} topic_id=${topic_id} consumer_next=2 pipeline_next=1 runner_next=3 es_documents=2 dlq_range=[${dlq_start_offset},${dlq_end_offset})"
+echo "说明：本轮 logs.dlq 验收记录不会被危险截断，将由 24 小时保留策略异步清理"

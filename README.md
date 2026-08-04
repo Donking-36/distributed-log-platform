@@ -89,8 +89,10 @@ go run ./cmd/log-producer
 make build
 ```
 
-当前只完成命令入口和单元级串行编排；处理器健康接口、容器镜像、Kubernetes
-部署，以及真实 Kafka→Elasticsearch/DLQ 联动验收尚未完成。
+真实 Kafka 4.3.1→Elasticsearch 9.4.4/DLQ 小载荷联动验收已经通过：有效记录写入
+Elasticsearch，永久无效记录写入 `logs.dlq` 并确认源位点，后续有效记录仍会继续
+处理。处理器健康接口、容器镜像、Kubernetes 部署、重复投递幂等和 Pod 重启恢复
+仍待完成。
 
 ## 容器镜像
 
@@ -476,23 +478,25 @@ Kafka 提交失败则返回独立的 `commit_failure`，不会误报整条记录
 提交响应丢失时会重放完整处理，依靠稳定 `_id` 从 `created` 收敛为
 `duplicate` 后再次提交。聚焦竞态测试语句覆盖率为 91.4%。
 
-真实 Kafka 4.3.1 集成测试还证明，`Consumer.Poll` 返回的原始记录能够穿过 pipeline
-并由同一 Consumer 提交，Broker 侧下一位点为 1；该测试使用受控 Elasticsearch
-writer 返回 `created`，因此未把证据外推为真实 Kafka→Elasticsearch 链路。
+真实 Kafka 4.3.1 的隔离集成测试还证明，`Consumer.Poll` 返回的原始记录能够穿过
+pipeline 并由同一 Consumer 提交，Broker 侧下一位点为 1。该测试仍使用受控
+Elasticsearch writer，只负责锁定不可伪造的原始记录身份。
 
 永久无效记录的 DLQ 单元边界也已建立：独立 Kafka 生产者固定同步写入
 `logs.dlq`，`DeadLetterHandler` 只有在获得 Broker 发布确认后才提交原始源记录。
 DLQ 记录使用稳定的源坐标 key，原始载荷以 Base64 无损保存；错误摘要只包含
 受控字段名和固定文案，不复制原始值。该边界已覆盖发布失败、取消和源提交失败，
-但尚未连接真实 Kafka。
+并已在下述真实联动验收中接入 Kafka。
 
 `Runner` 已把 Poll、有界投递和 DLQ 接成严格串行循环：正常投递只有源位点已提交
 才继续；只有永久无效记录进入 `DeadLetterHandler`，且 DLQ 发布和源位点提交均
 确认后才继续；任何其他未解决错误都会在下一次 Poll 前停止。`cmd/log-processor`
 已完成环境校验、真实依赖组装、SIGINT/SIGTERM 正常停止和 10 秒有界资源关闭。
 
-该证据目前限于单元、竞态和构建门禁。真实 Kafka DLQ、真实 Kafka→Elasticsearch、
-健康接口、处理器镜像与 Kubernetes 部署仍待实现。现有 Kafka 消费及
-pipeline token 可通过
-`make kafka-consumer-integration` 复现；该命令创建唯一临时主题、两个消费者组，
-并向 Kafka Pod 复制两个临时测试二进制。成功退出时会删除并确认这些资源均不存在。
+`make kafka-consumer-integration` 现在同时复现消费续读、pipeline token 和真实
+Runner 联动：唯一源主题按“有效→永久无效→有效”写入三条受控记录，最终断言
+Runner 组提交点为 3、Elasticsearch 只有两条确定性 ID 文档、`logs.dlq` 恰好新增
+一条且 envelope/Base64 原文正确。临时主题、三个消费者组、临时 ES 索引和测试
+二进制都会删除并复核；共享 `logs.dlq` 的验收记录不被危险截断，由 24 小时保留
+策略清理。健康接口、处理器镜像、Kubernetes 部署、重复投递幂等和 Pod 重启恢复
+仍待实现。
