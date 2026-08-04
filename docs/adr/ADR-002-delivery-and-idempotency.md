@@ -2,7 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-07-30
-- 更新日期：2026-08-03
+- 更新日期：2026-08-04
 
 ## 背景
 
@@ -29,8 +29,9 @@ Filebeat 和 Kafka 消费者在恢复时可能重复投递事件。Elasticsearch
 2. `container.id`
 3. `log.file.path`
 4. `log.offset` 的十进制文本
-5. 规范化为 UTC RFC3339Nano 的 `@timestamp`
-6. 原始 `message`
+5. Filebeat 外层 `message` 内业务事件的 `@timestamp`，规范化为 UTC RFC3339Nano
+6. Filebeat 外层 `message` 解码得到的完整业务 JSON 字符串，不是最终文档中仅供
+   全文检索的内部 `message` 正文
 
 将 UTF-8 值编码为版本前缀，后接带长度前缀的字段：
 
@@ -48,6 +49,10 @@ sha256:<lowercase-hex>
 保留在 `logs.unclassified`，不进入正常处理器，因此不以路径指纹冒充本业务
 `event_id` 所需的 Pod UID。缺失必需的标识字段属于永久性校验
 错误；处理器不得自行生成随机替代值。
+
+Kafka record offset 只表示消费者进度，不参与上述算法，也不能替代 Filebeat
+外层事件中的源文件 `log.offset`。Filebeat 外层自身可能存在另一个
+`@timestamp`，它不是最终业务事件时间，也不参与版本 1 标识。
 
 ### Elasticsearch 写入
 

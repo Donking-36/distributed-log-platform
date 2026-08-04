@@ -86,6 +86,17 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 出现第二个真实调用方或稳定的共享领域边界后，才把对应行为提取到
 `internal/`。
 
+`log-processor` 的 Filebeat 双层事件契约已经构成稳定领域边界，因此先放入
+`internal/event`，不堆入未来的 `cmd/log-processor/main.go`：
+
+- `event.go`：规范事件和可由 `errors.Is` 分类的永久校验错误；
+- `filebeat.go` 与 `filebeat_test.go`：解析 Filebeat 外层 JSON 及其 `message`
+  内的业务 JSON，校验必填身份、规范化时间与级别。
+
+Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
+只表示 Filebeat 补充的源文件 `log.offset`。Kafka、Elasticsearch、配置和进程入口
+只在对应职责实现时再建立，不预建空包。
+
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。
 
@@ -287,7 +298,7 @@ digest。
 ## 9. 验证层次
 
 1. 静态/配置：Go 格式检查与 `vet`、Shell 语法、Kustomize 构建、一次性 Job
-   资源边界与服务端准入、Filebeat 固定镜像配置正反例和十项 Kafka 校验器单测、
+   资源边界与服务端准入、Filebeat 固定镜像配置正反例和十一项 Kafka 校验器单测、
    Grafana 自动配置验证。
 2. 单元：解析、必填字段、级别规范化、确定性 ID 和重试分类。
 3. 集成：一条 Kafka 记录对应一个 Elasticsearch 文档；重复输入仍只产生

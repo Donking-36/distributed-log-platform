@@ -152,7 +152,11 @@
 - `log-producer` 产生事件时间、序号、级别、正文、原始服务名和测试批次。
 - Filebeat 补充 Kubernetes、容器、文件路径和偏移元数据，并按权威标签路由；
   元数据已失效时只保留可证明的采集字段并进入未分类主题。
+- `log-processor` 对 Kafka value 执行两层解析：外层是 Filebeat JSON，外层
+  `message` 字符串内部是 `log-producer` JSON。最终 `@timestamp` 和可检索正文
+  分别取内部业务事件的 `@timestamp` 与 `message`；外层同名时间不替代业务时间。
 - `log-processor` 校验服务身份，规范化最终字段，生成 `event_id` 和 `ingested_at`。
+  Kafka record offset 是消费进度，不能替代参与稳定标识的源文件 `log.offset`。
 
 ## 6. 非功能要求与量化口径
 

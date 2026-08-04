@@ -378,6 +378,14 @@ def _validate_record(
         errors.append(
             f"{location} 的 log.file.path 未指向实际验收 Pod：{log_path!r}"
         )
+    # log.offset 是源日志位置并参与 event_id；不能用 Kafka record offset 代替。
+    log_offset = _get_path(record.outer, "log.offset")
+    if (
+        isinstance(log_offset, bool)
+        or not isinstance(log_offset, int)
+        or log_offset < 0
+    ):
+        errors.append(f"{location} 的 log.offset 必须是非负整数，实际为 {log_offset!r}")
     return identity
 
 
