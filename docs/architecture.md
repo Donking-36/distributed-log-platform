@@ -1,6 +1,6 @@
 # 架构
 
-- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 单条显式提交及单记录处理编排边界已验证
+- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 单条显式提交、单次处理及六次有界投递周期单元边界已验证
 - 更新日期：2026-08-04
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
@@ -135,18 +135,25 @@ Kafka 消费已经构成第三个稳定外部边界，因此放入 `internal/kaf
 `cmd/log-processor/main.go`：
 
 - `result.go`：区分端到端 `created`/`duplicate`、永久无效、可重试、系统故障、
-  取消和提交失败；同时单独记录 Elasticsearch 逐项结果与 Kafka 是否已提交；
+  取消和提交失败；同时记录 Elasticsearch 逐项结果、Kafka 是否已提交，以及
+  一次有界投递周期的尝试次数和预算是否耗尽；
 - `processor.go`：依次调用 `ParseFilebeat`、`NewDocument`、单文档 `CreateBatch`
   和条件 `Commit`；只有可信的 `created`/`duplicate` 才能提交原始 Kafka 记录；
+- `delivery.go`：对同一原始记录最多执行六次完整 `Process`，只重试
+  `retryable_failure`/`commit_failure`；五级等待上限为 250 ms、500 ms、1 s、
+  2 s、4 s，使用全抖动并允许父级上下文中断；
 - `processor_test.go`：使用手写边界替身验证写入先于提交，以及所有失败分支均不
   错误推进位点；
+- `delivery_test.go`：精确验证六次尝试、五次等待、抖动闭区间、取消优先、预算
+  耗尽，以及提交响应丢失后完整重放并由稳定 `_id` 收敛；
 - `processor_integration_test.go`：使用真实 Kafka Poll 记录和受控 Elasticsearch
   writer，验证 pipeline 提交的仍是携带私有身份令牌的原始记录。
 
 Elasticsearch 写入和 Kafka 提交拥有独立的正数超时。提交失败时 Elasticsearch
 可能已经持久化文档，因此结果明确为 `commit_failure`；同一记录重放时再由稳定
-`_id` 的 409 收敛。pipeline 不拥有 Poll 循环、客户端关闭、六次退避、DLQ、
-连续前缀或健康状态，这些只在后续运行循环实现时加入。
+`_id` 的 409 收敛。`Processor` 只表达一次尝试，`DeliveryCycle` 才拥有 ADR-002
+固定的单记录重试预算。pipeline 仍不拥有 Poll 循环、客户端关闭、DLQ、多记录或
+多分区连续前缀和健康状态，这些只在后续运行循环实现时加入。
 
 Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
 只表示 Filebeat 补充的源文件 `log.offset`。进程环境配置和组合根只在建立
@@ -370,7 +377,8 @@ digest。
    Grafana 自动配置验证。
 2. 单元：解析、必填字段、级别规范化、确定性 ID、14 字段文档、Bulk NDJSON、
    逐项结果、请求级错误分类，以及 Kafka 配置、单条待确认状态、错误提交和关闭
-   不提交语义。
+   不提交语义；单记录处理还验证六次尝试、五级全抖动上限、提交失败重放、预算
+   耗尽和等待取消。
 3. 集成：Go 客户端直连真实 Elasticsearch 的首次 `create`、重复 `_id` 和唯一
    计数已通过；Go 客户端对真实 Kafka 4.3.1 的未确认重读、显式提交和同组重启
    续读及 pipeline 原始记录身份提交已通过；真实 Elasticsearch 处理器联动仍待验证。

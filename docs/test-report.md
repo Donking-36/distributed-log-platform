@@ -774,8 +774,32 @@ pipeline 组从 `Consumer.Poll` 取得 offset 0，再把同一记录交给 `Proc
 Broker 最终提交点为 1。若代码重建记录并丢失不可导出的私有 token，Commit 会返回
 `ErrRecordNotPending`，测试无法通过，因此该证据覆盖真实 Kafka 记录身份的透传。
 
-本节仍未连接真实 Elasticsearch，也未实现 Poll 循环、六次有界退避、DLQ、
-多分区连续前缀、健康接口、进程生命周期、部署或端到端恢复。
+同日继续按 ADR-002 为单条记录增加有界投递周期。测试先行时，聚焦测试因
+`DeliveryCycle`、`DeliveryResult`、抖动和可取消等待尚不存在而构建失败；最小实现
+完成后执行：
+
+```text
+go test -count=1 -race -cover -timeout=30s ./internal/pipeline
+ok  github.com/Donking-36/distributed-log-platform/internal/pipeline  1.118s
+coverage: 91.4% of statements
+```
+
+投递周期固定为最多六次完整 `Processor.Process`，只重试 `retryable_failure` 和
+`commit_failure`。前五次失败后的等待上限依次为 250 ms、500 ms、1 s、2 s、
+4 s，并在 `[0, 上限]` 内执行全抖动。父级上下文在开始尝试、准备重试及等待期间
+均优先终止；第六次仍为 `retryable_failure` 或 `commit_failure` 时才标记预算
+耗尽。
+
+测试通过注入抖动源和等待函数精确验证 6 次尝试、5 次等待及五级上限，不用真实
+长等待拖慢门禁；同时让默认构造器实际完成一次不超过 250 ms 的随机等待，并用
+默认计时器验证等待中的上下文取消。提交响应丢失场景使用真实 `Processor` 与
+手写 Elasticsearch writer：首次返回 `created` 且提交失败，
+第二次完整重放使用相同非空文档 `_id`，返回 `duplicate` 后提交成功。测试时刻故意
+变化，证明稳定的是事件 `_id`，不是包含 `ingested_at` 的整份文档。结果契约还会
+拒绝 `ResultKind`、Elasticsearch 逐项结果、错误返回与提交状态之间的矛盾组合。
+
+本节仍未连接真实 Elasticsearch，也未实现 Poll 循环、DLQ、多记录或多分区连续
+前缀、健康接口、进程生命周期、部署或端到端恢复；有界周期尚未接入持续消费进程。
 
 ### 当前边界
 
@@ -788,5 +812,5 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
 Broker 位点复核；但 Elasticsearch 仍是替身，尚未覆盖真实 Kafka→Elasticsearch
 联动、多记录/多分区连续前缀位点推进、真实重平衡、提交失败或响应丢失后的真实
-恢复、真正的六次退避、DLQ、健康接口、处理器部署、端到端恢复以及 Grafana
-查询链路。
+恢复、有界投递周期接入真实处理循环、DLQ、健康接口、处理器部署、端到端恢复
+以及 Grafana 查询链路。

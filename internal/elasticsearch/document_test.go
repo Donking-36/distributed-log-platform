@@ -29,8 +29,8 @@ func TestNewDocumentMatchesStorageContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EventID() error = %v", err)
 	}
-	if document.id != wantID {
-		t.Fatalf("document ID = %q, want %q", document.id, wantID)
+	if document.ID() != wantID {
+		t.Fatalf("document ID = %q, want %q", document.ID(), wantID)
 	}
 
 	var got map[string]any
