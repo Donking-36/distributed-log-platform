@@ -16,8 +16,8 @@ Pod 标准输出
   → Grafana
 ```
 
-`log-processor` 是规划中唯一的 Kafka 到 Elasticsearch 业务处理路径。链路采用
-至少一次投递模型；`log-processor` 将使用确定性事件 ID，实现 Elasticsearch
+`log-processor` 是唯一的 Kafka 到 Elasticsearch 业务处理路径。链路采用
+至少一次投递模型；`log-processor` 使用确定性事件 ID，实现 Elasticsearch
 写入幂等。
 
 ## 范围
@@ -67,6 +67,30 @@ PRODUCER_COUNT=2 \
 PRODUCER_INTERVAL=10ms \
 go run ./cmd/log-producer
 ```
+
+`log-processor` 已提供可编译的持续运行入口。它严格串行执行
+`Poll → 有界投递 → 必要时写入 DLQ → 源位点提交`，当前记录未得到提交确认时
+不会拉取下一条。启动配置如下：
+
+| 环境变量 | 必填 | 默认值 | 作用 |
+|---|---|---|---|
+| `PROCESSOR_KAFKA_BROKERS` | 是 | 无 | 逗号分隔的 Kafka `host:port` 地址 |
+| `PROCESSOR_KAFKA_GROUP_ID` | 是 | 无 | 消费者组 ID |
+| `PROCESSOR_KAFKA_TOPICS` | 是 | 无 | 逗号分隔的源主题；禁止包含 `logs.dlq` |
+| `PROCESSOR_ELASTICSEARCH_ENDPOINT` | 是 | 无 | Elasticsearch HTTP(S) 地址 |
+| `PROCESSOR_ELASTICSEARCH_INDEX` | 是 | 无 | 写入索引名 |
+| `PROCESSOR_WRITE_TIMEOUT` | 否 | `10s` | 单次 Elasticsearch 写入超时 |
+| `PROCESSOR_COMMIT_TIMEOUT` | 否 | `10s` | Kafka 源位点提交超时 |
+| `PROCESSOR_DLQ_PUBLISH_TIMEOUT` | 否 | `10s` | DLQ 发布确认超时 |
+
+构建入口会同时链接两个程序，但不会在仓库中留下二进制：
+
+```bash
+make build
+```
+
+当前只完成命令入口和单元级串行编排；处理器健康接口、容器镜像、Kubernetes
+部署，以及真实 Kafka→Elasticsearch/DLQ 联动验收尚未完成。
 
 ## 容器镜像
 
@@ -462,9 +486,13 @@ DLQ 记录使用稳定的源坐标 key，原始载荷以 Base64 无损保存；�
 受控字段名和固定文案，不复制原始值。该边界已覆盖发布失败、取消和源提交失败，
 但尚未连接真实 Kafka。
 
-尚未建立可运行的 Poll 循环；有界投递周期和 DLQ 边界均尚未接入持续消费进程。
-真实 Kafka 的 DLQ 写入、源位点提交及下一条有效记录继续处理验收，以及健康状态、
-处理器部署和真实 Kafka→Elasticsearch 端到端链路仍待实现。现有 Kafka 消费及
+`Runner` 已把 Poll、有界投递和 DLQ 接成严格串行循环：正常投递只有源位点已提交
+才继续；只有永久无效记录进入 `DeadLetterHandler`，且 DLQ 发布和源位点提交均
+确认后才继续；任何其他未解决错误都会在下一次 Poll 前停止。`cmd/log-processor`
+已完成环境校验、真实依赖组装、SIGINT/SIGTERM 正常停止和 10 秒有界资源关闭。
+
+该证据目前限于单元、竞态和构建门禁。真实 Kafka DLQ、真实 Kafka→Elasticsearch、
+健康接口、处理器镜像与 Kubernetes 部署仍待实现。现有 Kafka 消费及
 pipeline token 可通过
 `make kafka-consumer-integration` 复现；该命令创建唯一临时主题、两个消费者组，
 并向 Kafka Pod 复制两个临时测试二进制。成功退出时会删除并确认这些资源均不存在。

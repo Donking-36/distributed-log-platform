@@ -130,6 +130,7 @@ test:
 # build 单独验证 main 包能够完成链接，不生成仓库内二进制。
 build:
 	$(GO) build -o /dev/null ./cmd/log-producer
+	$(GO) build -o /dev/null ./cmd/log-processor
 
 # kafka-topic-initializer-test 纯本地验证 Kafka 4.3.1 文本解析的正反例，不连接集群。
 kafka-topic-initializer-test:

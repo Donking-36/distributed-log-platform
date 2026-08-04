@@ -735,8 +735,8 @@ ParseFilebeat
 ```
 
 `Processor` 和 `DeliveryCycle` 仍不直接写 DLQ；其永久无效结果保持未提交，可交给
-独立 `DeadLetterHandler` 处理，运行循环接线仍待实现。逐项或请求级可重试错误返回
-`retryable_failure`，配置、协议、结果数量和未知结果返回 `system_failure`。
+独立 `DeadLetterHandler` 处理，后续由串行 `Runner` 选择该路径。逐项或请求级可重试
+错误返回 `retryable_failure`，配置、协议、结果数量和未知结果返回 `system_failure`。
 写入取消返回 `canceled`。如果 Elasticsearch 已返回 `created`/`duplicate`，但
 Kafka Commit 失败，则返回 `commit_failure` 并保留原记录，不会把 ES 落盘成功
 误报为消费进度成功。写入和提交使用独立的正数超时，错误只记录
@@ -799,9 +799,9 @@ coverage: 91.4% of statements
 变化，证明稳定的是事件 `_id`，不是包含 `ingested_at` 的整份文档。结果契约还会
 拒绝 `ResultKind`、Elasticsearch 逐项结果、错误返回与提交状态之间的矛盾组合。
 
-本节仍未连接真实 Elasticsearch，也未实现 Poll 循环、多记录或多分区连续前缀、
-健康接口、进程生命周期、部署或端到端恢复；有界周期和下述 DLQ 边界均尚未接入
-持续消费进程。
+本节仍未连接真实 Elasticsearch，也未覆盖多记录或多分区连续前缀、健康接口、
+部署或端到端恢复；有界周期和下述 DLQ 边界已由后文的最小串行入口接入，但尚未
+经过真实依赖联动验收。
 
 ### Go 永久无效记录 DLQ 单元边界
 
@@ -835,10 +835,62 @@ GO=/usr/local/go/bin/go GOFMT=/usr/local/go/bin/gofmt make check
 ```
 
 本节只验证单元边界，尚未覆盖真实 Kafka 的 DLQ Broker 确认、源消费者组位点、
-毒消息后下一条有效记录继续处理、DLQ 重试或 Poll 运行循环接线。Base64 会使原始
-载荷增大约三分之一，当前也尚未为源主题、DLQ 主题与 franz-go producer 对齐明确的
-最大消息边界；真实 Kafka DLQ 验收前必须先固定该限制并覆盖边界值，避免大毒消息
-能够进入源主题却无法进入 DLQ。
+毒消息后下一条有效记录继续处理或 DLQ 重试。下述串行入口已完成 Poll 接线，但
+真实 Kafka DLQ 联动仍待验证。Base64 会使原始载荷增大约三分之一，当前也尚未为
+源主题、DLQ 主题与 franz-go producer 对齐明确的最大消息边界；真实大载荷矩阵
+在主链路受控小载荷验收后补做。
+
+### Go log-processor 串行运行入口
+
+2026-08-04 新增最小可运行的 `cmd/log-processor` 组合根和
+`internal/pipeline.Runner`。`config.go` 负责环境配置，`app.go` 组装真实客户端并
+关闭资源，`main.go` 只处理信号、结构化日志和退出码；持续业务循环仍位于稳定的
+pipeline 编排边界。
+
+Runner 保持单线程、单待确认记录，顺序固定为：
+
+```text
+Poll
+→ DeliveryCycle.Deliver
+→ created/duplicate 且源位点已提交：继续
+→ 仅永久无效：DeadLetterHandler.Handle
+→ DLQ 发布和源位点均已确认：继续
+→ 任何其他未解决结果：停止，不再 Poll
+```
+
+测试覆盖成功记录继续、永久无效记录 publish→commit 后继续、成功结果缺少提交
+确认、重试预算耗尽、DLQ 失败/未提交、启动前取消以及所有未解决分支都不再拉取。
+命令入口拒绝缺少或重复的配置、空列表成员、订阅 `logs.dlq` 和非正超时；只有父
+信号触发的取消按正常停机处理，意外 `context.Canceled` 仍返回错误。资源关闭使用
+独立的 10 秒 context，并行启动 Consumer、DLQ Producer 和 Elasticsearch 清理；
+即使 Kafka 离组阻塞，其他资源也会开始关闭，等待到期后进程以失败退出。
+
+测试先行时，聚焦命令因 `Runner`、配置和 application 生命周期尚不存在而构建
+失败；最小实现及有界关闭修复后，最终证据为：
+
+```text
+go test -count=1 -race ./internal/pipeline ./cmd/log-processor
+ok  github.com/Donking-36/distributed-log-platform/internal/pipeline
+ok  github.com/Donking-36/distributed-log-platform/cmd/log-processor
+
+make check
+通过：格式、Shell、Python fixture、vet、全量测试、两个命令构建和主题初始化器自测
+
+go test -count=1 -race -cover ./...
+cmd/log-processor  coverage: 62.3%
+internal/pipeline  coverage: 88.7%
+其余既有包竞态测试全部通过
+
+go mod verify
+all modules verified
+
+git diff --check
+通过
+```
+
+本节只证明最小串行循环、配置和生命周期契约已经接线并可构建。尚未证明真实
+Kafka→Elasticsearch、真实 Kafka DLQ、处理器健康接口、容器/Kubernetes 部署、
+重启恢复或完整 UC-001B 端到端链路。
 
 ### 当前边界
 
@@ -851,5 +903,5 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
 Broker 位点复核；但 Elasticsearch 仍是替身，尚未覆盖真实 Kafka→Elasticsearch
 联动、多记录/多分区连续前缀位点推进、真实重平衡、提交失败或响应丢失后的真实
-恢复、有界投递周期接入真实处理循环、真实 Kafka DLQ 联动及持续处理循环接入、
-健康接口、处理器部署、端到端恢复以及 Grafana 查询链路。
+恢复、真实 Kafka DLQ 联动、处理器健康接口、容器与 Kubernetes 部署、处理器重启、
+端到端恢复以及 Grafana 查询链路。串行持续处理入口已接线，但上述真实联动未完成。
