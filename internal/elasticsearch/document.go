@@ -17,6 +17,11 @@ type Document struct {
 	source []byte
 }
 
+// ID 返回用作 Elasticsearch _id 的稳定事件标识。
+func (document Document) ID() string {
+	return document.id
+}
+
 type storedDocument struct {
 	Timestamp time.Time `json:"@timestamp"`
 	EventID   string    `json:"event_id"`

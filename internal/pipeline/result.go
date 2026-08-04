@@ -30,3 +30,12 @@ type Result struct {
 	ElasticsearchResult elasticsearch.ResultKind
 	Committed           bool
 }
+
+// DeliveryResult 保存一次有界投递周期的最终状态。
+// LastResult 是最后一次 Processor 尝试的原始结果；Attempts 是实际尝试次数。
+// Exhausted 只在第六次仍为可重试或提交失败时为 true，取消和终止故障不会耗尽预算。
+type DeliveryResult struct {
+	LastResult Result
+	Attempts   int
+	Exhausted  bool
+}
