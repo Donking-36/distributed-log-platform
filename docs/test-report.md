@@ -713,10 +713,69 @@ committed_next_offset=2
 C 确认后，Broker 上该组的提交点为 2。测试退出后，临时 topic、consumer group、
 Pod 内测试二进制和本地编译目录均不存在，四个项目主题未被用作 fixture。
 
-这只证明 Kafka 4.3.1 上单分区、单记录、无并发的最小消费/提交/续读语义；尚未
-覆盖多记录或多分区的连续前缀、真实 rebalance 与分区撤销、提交失败或响应丢失、
-Kafka 结果与 Elasticsearch `created`/`duplicate` 的联动确认、六次有界退避、
-DLQ、完整处理循环、健康接口、部署及端到端恢复。
+这只证明 Kafka 4.3.1 上单分区、单记录、无并发的最小消费/提交/续读语义；
+Kafka 与 Elasticsearch 的最小联动单元证据见下一节。真实依赖联动、多记录或
+多分区的连续前缀、真实 rebalance 与分区撤销、提交失败或响应丢失仍未覆盖。
+
+### Go 单记录处理编排边界
+
+2026-08-04 新增 `internal/pipeline`，只负责一条 Kafka 记录的端到端确认策略。
+它直接复用 `event.ParseFilebeat` 和 `elasticsearch.NewDocument`，并只在
+Elasticsearch、Kafka 两个外部边界定义 `BulkWriter` 与 `RecordCommitter` 小接口，
+没有为解析器、时钟或纯转换增加通用抽象。
+
+处理顺序固定为：
+
+```text
+ParseFilebeat
+→ NewDocument
+→ 单文档 CreateBatch
+→ 仅 created / duplicate 执行 Commit
+→ Commit 成功后返回端到端成功
+```
+
+永久无效事件当前还没有 DLQ 写入路径，因此保持未提交；逐项或请求级可重试错误返回
+`retryable_failure`，配置、协议、结果数量和未知结果返回 `system_failure`。
+写入取消返回 `canceled`。如果 Elasticsearch 已返回 `created`/`duplicate`，但
+Kafka Commit 失败，则返回 `commit_failure` 并保留原记录，不会把 ES 落盘成功
+误报为消费进度成功。写入和提交使用独立的正数超时，错误只记录
+topic/partition/offset，不包含原始 value。
+
+测试先行阶段，`go test ./internal/pipeline` 因结果类型、外部接口与 Processor
+不存在而构建失败；补入最小实现后执行：
+
+```text
+go test -count=1 -race -cover ./internal/pipeline
+ok  github.com/Donking-36/distributed-log-platform/internal/pipeline  1.038s
+coverage: 95.7% of statements
+```
+
+测试覆盖 `created`、`duplicate`、逐项可重试/系统故障、未知结果、永久无效输入、
+文档不变量失败、请求错误与结果同时返回、0/多结果、写入/提交实际超时、父
+context 在写入前后取消和两种已接受写入后的 Commit 失败，并验证调用顺序严格为
+write→commit。`make check` 同步通过。
+
+随后再次执行 `make kafka-consumer-integration`，以真实 Kafka 记录验证私有提交身份；
+Elasticsearch writer 仍为只返回 `created` 的受控替身。最终证据为：
+
+```text
+run_id=20260804t053849z-336244
+topic=logs.integration.kafka-consumer.20260804t053849z-336244
+topic_id=X5S-1582S--b0vqoQPhfnA
+consumer_group=integration.log-processor.20260804t053849z-336244
+consumer_next_offset=2
+pipeline_group=integration.log-pipeline.20260804t053849z-336244
+pipeline_processed_offset=0
+pipeline_committed_next_offset=1
+cleanup=topic、两个 consumer group、两个 Pod 内测试二进制和本地编译目录均不存在
+```
+
+pipeline 组从 `Consumer.Poll` 取得 offset 0，再把同一记录交给 `Processor.Process`；
+Broker 最终提交点为 1。若代码重建记录并丢失不可导出的私有 token，Commit 会返回
+`ErrRecordNotPending`，测试无法通过，因此该证据覆盖真实 Kafka 记录身份的透传。
+
+本节仍未连接真实 Elasticsearch，也未实现 Poll 循环、六次有界退避、DLQ、
+多分区连续前缀、健康接口、进程生命周期、部署或端到端恢复。
 
 ### 当前边界
 
@@ -726,6 +785,8 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 同一 PVC 上故障前位点连续可读并继续推进，新产生的 40 条日志恢复后完整投递。
 它不代表多节点故障转移、任意长中断、队列饱和、节点磁盘丢失、TLS/SASL 或
 生产容量；Elasticsearch 服务端、Go Bulk 写入和 Kafka 单条显式提交边界已经覆盖，
-但尚未覆盖 Kafka→Elasticsearch 结果联动、多记录/多分区连续前缀位点推进、
-真实重平衡、提交失败或响应丢失、真正的六次退避、DLQ、健康接口、处理器部署、
-端到端恢复以及 Grafana 查询链路。
+单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
+Broker 位点复核；但 Elasticsearch 仍是替身，尚未覆盖真实 Kafka→Elasticsearch
+联动、多记录/多分区连续前缀位点推进、真实重平衡、提交失败或响应丢失后的真实
+恢复、真正的六次退避、DLQ、健康接口、处理器部署、端到端恢复以及 Grafana
+查询链路。

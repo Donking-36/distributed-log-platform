@@ -438,10 +438,20 @@ Go→Elasticsearch 写入边界。
 `internal/kafka` 已固定 `franz-go v1.21.5`，建立一次只拉取一条记录的最小消费
 边界：自动提交关闭，调用方只有显式确认当前记录后才能拉取下一条；提交失败会
 保留当前记录，关闭消费者不会隐式推进位点。真实 Kafka 4.3.1 验收证明同一
-消费者组关闭前未确认的位点会被再次读取，显式确认后重启则从下一位点
-继续，临时主题、消费者组和测试二进制均已清理。消费、事件解析、Elasticsearch
-结果判断、连续前缀协调、退避、DLQ 和健康状态尚未串成完整 `log-processor`
-进程。
-可通过 `make kafka-consumer-integration` 复现；该命令只创建唯一临时主题和
-消费者组，并向 Kafka Pod 复制临时测试二进制，退出时会核对身份、删除并确认
-三者均不存在。
+消费者组关闭前未确认的位点会被再次读取，显式确认后重启则从下一位点继续。
+
+`internal/pipeline` 已建立最小单记录编排：解析 Kafka value、构造不可变文档、
+执行一次 Elasticsearch Bulk `create`，并且只在逐项结果为 `created` 或
+`duplicate` 时提交原始 Kafka 记录。Elasticsearch 写入与 Kafka 提交使用独立
+超时；永久无效、可重试、系统故障和取消均不提交，ES 已接受但 Kafka 提交失败
+则返回独立的 `commit_failure`，不会误报整条记录成功。聚焦竞态测试覆盖调用顺序、
+结果与错误冲突、结果数量异常、独立超时、取消和提交失败，语句覆盖率为 95.7%。
+
+真实 Kafka 4.3.1 集成测试还证明，`Consumer.Poll` 返回的原始记录能够穿过 pipeline
+并由同一 Consumer 提交，Broker 侧下一位点为 1；该测试使用受控 Elasticsearch
+writer 返回 `created`，因此未把证据外推为真实 Kafka→Elasticsearch 链路。
+
+尚未建立可运行的 Poll 循环、六次有界退避、DLQ 写入、健康状态、处理器部署或
+真实 Kafka→Elasticsearch 端到端链路。Kafka 消费及 pipeline token 可通过
+`make kafka-consumer-integration` 复现；该命令创建唯一临时主题、两个消费者组，
+并向 Kafka Pod 复制两个临时测试二进制。成功退出时会删除并确认这些资源均不存在。

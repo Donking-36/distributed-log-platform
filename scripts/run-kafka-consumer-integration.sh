@@ -36,9 +36,11 @@ fi
 readonly RUN_ID="${KAFKA_CONSUMER_TEST_RUN_ID}"
 readonly TOPIC="logs.integration.kafka-consumer.${RUN_ID}"
 readonly GROUP_ID="integration.log-processor.${RUN_ID}"
-readonly FIRST_VALUE="kafka-consumer-${RUN_ID}-first"
-readonly SECOND_VALUE="kafka-consumer-${RUN_ID}-second"
+readonly PIPELINE_GROUP_ID="integration.log-pipeline.${RUN_ID}"
+readonly FIRST_VALUE='{"message":"{\"@timestamp\":\"2026-08-04T04:00:00Z\",\"event.sequence\":1,\"log.level\":\"INFO\",\"message\":\"pipeline integration first\",\"service.name\":\"api-service\",\"test_run_id\":\"pipeline-integration\"}","kubernetes":{"namespace":"stage3-logs","labels":{"service":"api-service"},"pod":{"name":"api-service-integration","uid":"pod-uid-pipeline-integration"}},"container":{"id":"container-id-pipeline-integration"},"log":{"offset":100,"file":{"path":"/var/log/containers/api-service-integration.log"}}}'
+readonly SECOND_VALUE='{"message":"{\"@timestamp\":\"2026-08-04T04:00:01Z\",\"event.sequence\":2,\"log.level\":\"WARN\",\"message\":\"pipeline integration second\",\"service.name\":\"api-service\",\"test_run_id\":\"pipeline-integration\"}","kubernetes":{"namespace":"stage3-logs","labels":{"service":"api-service"},"pod":{"name":"api-service-integration","uid":"pod-uid-pipeline-integration"}},"container":{"id":"container-id-pipeline-integration"},"log":{"offset":101,"file":{"path":"/var/log/containers/api-service-integration.log"}}}'
 readonly REMOTE_BINARY="/tmp/kafka-consumer-integration-${RUN_ID}.test"
+readonly REMOTE_PIPELINE_BINARY="/tmp/kafka-pipeline-integration-${RUN_ID}.test"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
@@ -123,12 +125,13 @@ topic_id_from_description() {
 }
 
 group_state() {
+  local group_id="$1"
   local groups
   groups="$(kafka_exec \
     "${GROUPS_CLI}" \
     --bootstrap-server "${BOOTSTRAP_SERVER}" \
     --list)" || return
-  if grep -Fqx -- "${GROUP_ID}" <<<"${groups}"; then
+  if grep -Fqx -- "${group_id}" <<<"${groups}"; then
     printf exists
   else
     printf absent
@@ -136,76 +139,99 @@ group_state() {
 }
 
 remote_binary_state() {
+  local remote_path="$1"
   kafka_exec sh -c \
     'if [ -e "$1" ]; then printf exists; else printf absent; fi' \
     _ \
-    "${REMOTE_BINARY}"
+    "${remote_path}"
 }
 
 existing_topic="$(topic_description)"
 [[ -z "${existing_topic}" ]] || fail "临时 Kafka topic 已存在，拒绝复用：${TOPIC}"
-existing_group_state="$(group_state)"
-if [[ "${existing_group_state}" == "exists" ]]; then
-  fail "临时 Kafka consumer group 已存在，拒绝复用：${GROUP_ID}"
-fi
-[[ "${existing_group_state}" == "absent" ]] ||
-  fail "无法确认临时 Kafka consumer group 状态：${GROUP_ID}"
+for candidate_group_id in "${GROUP_ID}" "${PIPELINE_GROUP_ID}"; do
+  existing_group_state="$(group_state "${candidate_group_id}")"
+  if [[ "${existing_group_state}" == "exists" ]]; then
+    fail "临时 Kafka consumer group 已存在，拒绝复用：${candidate_group_id}"
+  fi
+  [[ "${existing_group_state}" == "absent" ]] ||
+    fail "无法确认临时 Kafka consumer group 状态：${candidate_group_id}"
+done
 
-existing_remote_binary_state="$(remote_binary_state)"
-[[ "${existing_remote_binary_state}" == "absent" ]] ||
-  fail "临时测试二进制路径已存在，拒绝覆盖：${REMOTE_BINARY}"
+for candidate_remote_binary in "${REMOTE_BINARY}" "${REMOTE_PIPELINE_BINARY}"; do
+  existing_remote_binary_state="$(remote_binary_state "${candidate_remote_binary}")"
+  [[ "${existing_remote_binary_state}" == "absent" ]] ||
+    fail "临时测试二进制路径已存在，拒绝覆盖：${candidate_remote_binary}"
+done
 
 umask 077
 work_dir="$(mktemp -d)"
 local_binary="${work_dir}/kafka-consumer-integration.test"
+local_pipeline_binary="${work_dir}/kafka-pipeline-integration.test"
 topic_create_attempted=false
 remote_binary_attempted=false
+remote_pipeline_binary_attempted=false
 topic_id=""
+
+cleanup_remote_binary() {
+  local remote_path="$1"
+  local current_state
+  if ! kafka_exec rm -f -- "${remote_path}"; then
+    echo "清理 Kafka 集成测试远端二进制失败：${remote_path}" >&2
+    cleanup_failed=true
+  elif ! current_state="$(remote_binary_state "${remote_path}")"; then
+    echo "无法复核 Kafka 集成测试远端二进制：${remote_path}" >&2
+    cleanup_failed=true
+  elif [[ "${current_state}" != "absent" ]]; then
+    echo "Kafka 集成测试远端二进制删除后仍存在：${remote_path}" >&2
+    cleanup_failed=true
+  fi
+}
+
+cleanup_group() {
+  local group_id="$1"
+  local current_state
+  if ! current_state="$(group_state "${group_id}")"; then
+    echo "无法查询 Kafka 集成测试 consumer group：${group_id}" >&2
+    cleanup_failed=true
+  elif [[ "${current_state}" == "exists" ]]; then
+    if ! kafka_exec \
+      "${GROUPS_CLI}" \
+      --bootstrap-server "${BOOTSTRAP_SERVER}" \
+      --delete \
+      --group "${group_id}" >/dev/null; then
+      echo "清理 Kafka 集成测试 consumer group 失败：${group_id}" >&2
+      cleanup_failed=true
+    elif ! current_state="$(group_state "${group_id}")"; then
+      echo "无法复核 Kafka 集成测试 consumer group：${group_id}" >&2
+      cleanup_failed=true
+    elif [[ "${current_state}" != "absent" ]]; then
+      echo "Kafka 集成测试 consumer group 删除后仍存在：${group_id}" >&2
+      cleanup_failed=true
+    fi
+  elif [[ "${current_state}" != "absent" ]]; then
+    echo "Kafka 集成测试 consumer group 状态无效：${current_state}" >&2
+    cleanup_failed=true
+  fi
+}
 
 cleanup() {
   local exit_code=$?
   local cleanup_failed=false
-  local current_description current_group_state current_remote_binary_state current_topic_id attempt
+  local current_description current_topic_id attempt
   local topic_query_failed=false
   local topic_deleted=false
   trap - EXIT
   set +e
 
   if [[ "${remote_binary_attempted}" == "true" ]]; then
-    if ! kafka_exec rm -f -- "${REMOTE_BINARY}"; then
-      echo "清理 Kafka 集成测试远端二进制失败：${REMOTE_BINARY}" >&2
-      cleanup_failed=true
-    elif ! current_remote_binary_state="$(remote_binary_state)"; then
-      echo "无法复核 Kafka 集成测试远端二进制：${REMOTE_BINARY}" >&2
-      cleanup_failed=true
-    elif [[ "${current_remote_binary_state}" != "absent" ]]; then
-      echo "Kafka 集成测试远端二进制删除后仍存在：${REMOTE_BINARY}" >&2
-      cleanup_failed=true
-    fi
+    cleanup_remote_binary "${REMOTE_BINARY}"
+  fi
+  if [[ "${remote_pipeline_binary_attempted}" == "true" ]]; then
+    cleanup_remote_binary "${REMOTE_PIPELINE_BINARY}"
   fi
 
-  if ! current_group_state="$(group_state)"; then
-    echo "无法查询 Kafka 集成测试 consumer group：${GROUP_ID}" >&2
-    cleanup_failed=true
-  elif [[ "${current_group_state}" == "exists" ]]; then
-    if ! kafka_exec \
-      "${GROUPS_CLI}" \
-      --bootstrap-server "${BOOTSTRAP_SERVER}" \
-      --delete \
-      --group "${GROUP_ID}" >/dev/null; then
-      echo "清理 Kafka 集成测试 consumer group 失败：${GROUP_ID}" >&2
-      cleanup_failed=true
-    elif ! current_group_state="$(group_state)"; then
-      echo "无法复核 Kafka 集成测试 consumer group：${GROUP_ID}" >&2
-      cleanup_failed=true
-    elif [[ "${current_group_state}" != "absent" ]]; then
-      echo "Kafka 集成测试 consumer group 删除后仍存在：${GROUP_ID}" >&2
-      cleanup_failed=true
-    fi
-  elif [[ "${current_group_state}" != "absent" ]]; then
-    echo "Kafka 集成测试 consumer group 状态无效：${current_group_state}" >&2
-    cleanup_failed=true
-  fi
+  cleanup_group "${GROUP_ID}"
+  cleanup_group "${PIPELINE_GROUP_ID}"
 
   if [[ "${topic_create_attempted}" == "true" ]]; then
     if ! current_description="$(topic_description)"; then
@@ -251,7 +277,7 @@ cleanup() {
     fi
   fi
 
-  rm -f -- "${local_binary}"
+  rm -f -- "${local_binary}" "${local_pipeline_binary}"
   if ! rmdir -- "${work_dir}"; then
     echo "清理本地 Kafka 集成测试目录失败：${work_dir}" >&2
     cleanup_failed=true
@@ -261,7 +287,7 @@ cleanup() {
     exit_code=1
   fi
   if [[ "${exit_code}" -eq 0 ]]; then
-    echo "Kafka 集成测试临时资源清理通过：topic、consumer group、测试二进制均不存在"
+    echo "Kafka 集成测试临时资源清理通过：topic、consumer groups、测试二进制均不存在"
   fi
   exit "${exit_code}"
 }
@@ -309,6 +335,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test \
   -o "${local_binary}" \
   ./internal/kafka
 
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test \
+  -c \
+  -tags=integration \
+  -o "${local_pipeline_binary}" \
+  ./internal/pipeline
+
 remote_binary_attempted=true
 "${KUBECTL}" \
   --context="${KUBE_CONTEXT}" \
@@ -317,7 +349,16 @@ remote_binary_attempted=true
   -c "${KAFKA_CONTAINER}" \
   "${local_binary}" \
   "${KAFKA_POD}:${REMOTE_BINARY}"
-kafka_exec chmod 0700 "${REMOTE_BINARY}"
+
+remote_pipeline_binary_attempted=true
+"${KUBECTL}" \
+  --context="${KUBE_CONTEXT}" \
+  cp \
+  -n "${KUBE_NAMESPACE}" \
+  -c "${KAFKA_CONTAINER}" \
+  "${local_pipeline_binary}" \
+  "${KAFKA_POD}:${REMOTE_PIPELINE_BINARY}"
+kafka_exec chmod 0700 "${REMOTE_BINARY}" "${REMOTE_PIPELINE_BINARY}"
 
 kafka_exec \
   env \
@@ -329,6 +370,17 @@ kafka_exec \
   "${REMOTE_BINARY}" \
   -test.v \
   -test.run '^TestConsumerResumesFromExplicitCommit$' \
+  -test.timeout "${TIMEOUT_SECONDS}s"
+
+kafka_exec \
+  env \
+  "KAFKA_TEST_BROKERS=${BOOTSTRAP_SERVER}" \
+  "KAFKA_TEST_TOPIC=${TOPIC}" \
+  "KAFKA_PIPELINE_GROUP_ID=${PIPELINE_GROUP_ID}" \
+  "KAFKA_TEST_FIRST_VALUE=${FIRST_VALUE}" \
+  "${REMOTE_PIPELINE_BINARY}" \
+  -test.v \
+  -test.run '^TestProcessorCommitsOriginalKafkaRecord$' \
   -test.timeout "${TIMEOUT_SECONDS}s"
 
 group_description="$(kafka_exec \
@@ -344,4 +396,17 @@ committed_offset="$(awk \
 [[ "${committed_offset}" == "2" ]] ||
   fail "consumer group 已提交下一位点 = ${committed_offset:-缺失}，期望 2"
 
-echo "Kafka 4.3.1 消费续读验证通过：run_id=${RUN_ID} topic_id=${topic_id} first=0 repeated=0 resumed=1 committed_next=2"
+pipeline_group_description="$(kafka_exec \
+  "${GROUPS_CLI}" \
+  --bootstrap-server "${BOOTSTRAP_SERVER}" \
+  --describe \
+  --group "${PIPELINE_GROUP_ID}")"
+pipeline_committed_offset="$(awk \
+  -v group="${PIPELINE_GROUP_ID}" \
+  -v topic="${TOPIC}" \
+  '$1 == group && $2 == topic && $3 == "0" { print $4 }' \
+  <<<"${pipeline_group_description}")"
+[[ "${pipeline_committed_offset}" == "1" ]] ||
+  fail "pipeline consumer group 已提交下一位点 = ${pipeline_committed_offset:-缺失}，期望 1"
+
+echo "Kafka 4.3.1 消费与 pipeline token 验证通过：run_id=${RUN_ID} topic_id=${topic_id} consumer_next=2 pipeline_next=1"

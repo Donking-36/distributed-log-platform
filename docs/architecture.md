@@ -1,6 +1,6 @@
 # 架构
 
-- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入及 Kafka 单条显式提交边界已验证
+- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 单条显式提交及单记录处理编排边界已验证
 - 更新日期：2026-08-04
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
@@ -130,9 +130,27 @@ Kafka 消费已经构成第三个稳定外部边界，因此放入 `internal/kaf
 这个包只拥有传输和提交边界，不决定事件是否合法、Elasticsearch 结果能否确认、
 多记录或多分区的连续前缀、退避、DLQ 和健康状态。
 
+单条记录的确认策略已经成为三个稳定边界之间的编排职责，因此放入
+`internal/pipeline`，沿用阶段计划中的既有术语，而不堆入未来的
+`cmd/log-processor/main.go`：
+
+- `result.go`：区分端到端 `created`/`duplicate`、永久无效、可重试、系统故障、
+  取消和提交失败；同时单独记录 Elasticsearch 逐项结果与 Kafka 是否已提交；
+- `processor.go`：依次调用 `ParseFilebeat`、`NewDocument`、单文档 `CreateBatch`
+  和条件 `Commit`；只有可信的 `created`/`duplicate` 才能提交原始 Kafka 记录；
+- `processor_test.go`：使用手写边界替身验证写入先于提交，以及所有失败分支均不
+  错误推进位点；
+- `processor_integration_test.go`：使用真实 Kafka Poll 记录和受控 Elasticsearch
+  writer，验证 pipeline 提交的仍是携带私有身份令牌的原始记录。
+
+Elasticsearch 写入和 Kafka 提交拥有独立的正数超时。提交失败时 Elasticsearch
+可能已经持久化文档，因此结果明确为 `commit_failure`；同一记录重放时再由稳定
+`_id` 的 409 收敛。pipeline 不拥有 Poll 循环、客户端关闭、六次退避、DLQ、
+连续前缀或健康状态，这些只在后续运行循环实现时加入。
+
 Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
-只表示 Filebeat 补充的源文件 `log.offset`。处理器配置和进程入口只在对应职责
-实现时再建立，不预建空包。
+只表示 Filebeat 补充的源文件 `log.offset`。进程环境配置和组合根只在建立
+`cmd/log-processor` 时实现，不预建空入口。
 
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。
@@ -355,7 +373,7 @@ digest。
    不提交语义。
 3. 集成：Go 客户端直连真实 Elasticsearch 的首次 `create`、重复 `_id` 和唯一
    计数已通过；Go 客户端对真实 Kafka 4.3.1 的未确认重读、显式提交和同组重启
-   续读已通过；一条 Kafka 记录对应一个 Elasticsearch 文档仍需处理器链路验证。
+   续读及 pipeline 原始记录身份提交已通过；真实 Elasticsearch 处理器联动仍待验证。
 4. 端到端：Filebeat 按 Kafka 有界位点验证两个演示服务的唯一 `test_run_id`、
    Pod UID key、原始消息和主题隔离；元数据失效 fixture 验证未分类路径指纹。
    完整链路后续继续验证数据最终可在 Grafana 中查看。
