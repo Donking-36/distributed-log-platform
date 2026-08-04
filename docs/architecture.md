@@ -91,7 +91,12 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 
 - `event.go`：规范事件和可由 `errors.Is` 分类的永久校验错误；
 - `filebeat.go` 与 `filebeat_test.go`：解析 Filebeat 外层 JSON 及其 `message`
-  内的业务 JSON，校验必填身份、规范化时间与级别。
+  内的业务 JSON，校验必填身份、规范化时间与级别；
+- `id.go` 与 `id_test.go`：按 ADR-002 的版本化字节协议生成确定性
+  `event_id`，并用固定向量锁定跨实现结果。
+
+解析器只在 `Event` 内部保留生成 ID 所需的原始业务 JSON；该值不对外导出，
+也不会作为额外字段写入 Elasticsearch，避免领域标识材料泄漏到存储模型。
 
 Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
 只表示 Filebeat 补充的源文件 `log.offset`。Kafka、Elasticsearch、配置和进程入口

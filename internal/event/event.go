@@ -26,6 +26,10 @@ type Event struct {
 	ContainerID string
 	LogFilePath string
 	LogOffset   int64
+
+	// rawMessage 保留 Filebeat message 解码后的原始业务 JSON，仅用于生成稳定事件 ID。
+	// 该字段不对外导出，也不会进入后续 Elasticsearch 文档。
+	rawMessage string
 }
 
 // ValidationError 指明永久无效事件对应的契约字段。

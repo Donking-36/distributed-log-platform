@@ -585,6 +585,22 @@ restore_started_at=2026-08-03T09:01:46Z
 不变。两个 Job 最后按 UID、用途和 run-id 三重匹配删除，集群中没有故障验收
 残留，Kafka/Filebeat overlay diff 仍为空。
 
+### Filebeat 事件解析与确定性 ID 单元验证
+
+2026-08-04 完成 `internal/event` 的纯 Go 解析和 `event_id v1` 计算边界。
+ID 测试覆盖 UTF-8 固定向量、原始业务 JSON 保持、相同时刻跨时区稳定性、六个
+身份字段逐项变化、非身份字段与 Filebeat 外层时间不影响结果、长度前缀防字段
+边界碰撞，以及缺失稳定身份时的永久错误分类。解析器同时拒绝零值业务时间，
+避免出现解析成功但生成 ID 失败的不一致状态。
+固定向量结果为
+`sha256:0bf68546f85a708f7b01b1f96c3738a1c6d1c406e6b20844dce629407de3ad97`，
+从真实 Filebeat 双层结构解析得到的向量结果为
+`sha256:c8eaed2985adc25f832a6835101d75f6fb563f1e10556f5d1d232890d7555055`。
+
+`make check`、`git diff --check` 和 `go test -race -cover ./...` 均通过；
+`internal/event` 语句覆盖率为 97.3%。本验证只证明纯函数契约，尚未声明 Kafka
+消费、Elasticsearch 写入或端到端幂等已经完成。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
