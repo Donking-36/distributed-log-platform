@@ -467,6 +467,12 @@ dlq:            0 matching events
 同一 Pod 的全部事件落入同一分区。消费范围内还包含持续 Deployment 的正常日志，
 验证器通过唯一批次 ID 排除它们，没有把旧数据误计为验收成功。
 
+2026-08-04 在实现 `log-processor` 解析器前，验收器新增 `log.offset` 必须存在、
+类型为整数且不小于 0 的门禁；缺失、负数、小数和布尔值四个反例均先失败后转绿。
+真实批次 `uc001-filebeat-b20edd4bbf544226b977ac5efc33bdb6` 随后重新执行，
+api/worker 各 20 条、合计 40 条逻辑/40 条物理记录、0 重复，全部通过源文件位点
+门禁。这里的 `log.offset` 与 Kafka 抓取行中的 record offset 是两个独立字段。
+
 ### 缺少元数据的兜底验收
 
 `make k8s-filebeat-fallback-acceptance` 在 Minikube 节点创建一条大于 1024 字节的

@@ -57,6 +57,7 @@ class ValidateFilebeatKafkaOutputTest(unittest.TestCase):
                     "pod": {"name": pod_name, "uid": pod_uid},
                 },
                 "log": {
+                    "offset": 0,
                     "file": {
                         "path": f"/var/log/containers/{pod_name}_{self.NAMESPACE}_log-producer-deadbeef.log"
                     }
@@ -183,6 +184,28 @@ class ValidateFilebeatKafkaOutputTest(unittest.TestCase):
 
         self.assertEqual(1, status)
         self.assertIn("Kafka key 应为实际 Pod UID", stderr)
+
+    def test_rejects_missing_or_invalid_source_log_offset(self) -> None:
+        mutations = {
+            "missing": lambda outer: outer["log"].pop("offset"),
+            "negative": lambda outer: outer["log"].__setitem__("offset", -1),
+            "fractional": lambda outer: outer["log"].__setitem__("offset", 1.5),
+            "boolean": lambda outer: outer["log"].__setitem__("offset", True),
+        }
+
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                captures = self._valid_captures()
+                parts = captures["logs.api-service"][0].split("\t", 3)
+                outer = json.loads(parts[3])
+                mutate(outer)
+                parts[3] = json.dumps(outer, separators=(",", ":"))
+                captures["logs.api-service"][0] = "\t".join(parts)
+
+                status, _, stderr = self._run(self._write_fixture(captures))
+
+                self.assertEqual(1, status)
+                self.assertIn("log.offset 必须是非负整数", stderr)
 
     def test_rejects_conflicting_duplicate(self) -> None:
         captures = self._valid_captures()

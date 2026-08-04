@@ -354,7 +354,7 @@ make k8s-kafka-topics-status
 ```
 
 `make check` 聚合 Go 1.26.5 版本、格式、静态检查、测试和构建门禁，并执行所有
-Shell 脚本语法检查、Kafka 主题解析自测及 Filebeat Kafka 校验器十项标准库测试；
+Shell 脚本语法检查、Kafka 主题解析自测及 Filebeat Kafka 校验器十一项标准库测试；
 它不会修改工作区。需要主动格式化代码时执行 `make fmt`。
 
 ## 开发流程
