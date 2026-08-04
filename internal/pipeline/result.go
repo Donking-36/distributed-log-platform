@@ -10,7 +10,8 @@ const (
 	ResultCreated ResultKind = "created"
 	// ResultDuplicate 表示 Elasticsearch 已确认重复文档，且 Kafka 位点提交成功。
 	ResultDuplicate ResultKind = "duplicate"
-	// ResultInvalid 表示记录永久不符合事件契约；DLQ 写入路径尚未实现，因此不能提交位点。
+	// ResultInvalid 表示记录永久不符合事件契约；Processor 本身不会提交位点，
+	// 后续只有 DeadLetterHandler 获得 DLQ 写入确认后才允许提交。
 	ResultInvalid ResultKind = "invalid"
 	// ResultRetryableFailure 表示暂时性写入故障，调用方后续可执行有界重试。
 	ResultRetryableFailure ResultKind = "retryable_failure"

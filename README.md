@@ -456,8 +456,15 @@ Kafka 提交失败则返回独立的 `commit_failure`，不会误报整条记录
 并由同一 Consumer 提交，Broker 侧下一位点为 1；该测试使用受控 Elasticsearch
 writer 返回 `created`，因此未把证据外推为真实 Kafka→Elasticsearch 链路。
 
-尚未建立可运行的 Poll 循环、DLQ 写入、健康状态、处理器部署或真实
-Kafka→Elasticsearch 端到端链路；有界投递周期也尚未接入持续消费进程。Kafka
-消费及 pipeline token 可通过
+永久无效记录的 DLQ 单元边界也已建立：独立 Kafka 生产者固定同步写入
+`logs.dlq`，`DeadLetterHandler` 只有在获得 Broker 发布确认后才提交原始源记录。
+DLQ 记录使用稳定的源坐标 key，原始载荷以 Base64 无损保存；错误摘要只包含
+受控字段名和固定文案，不复制原始值。该边界已覆盖发布失败、取消和源提交失败，
+但尚未连接真实 Kafka。
+
+尚未建立可运行的 Poll 循环；有界投递周期和 DLQ 边界均尚未接入持续消费进程。
+真实 Kafka 的 DLQ 写入、源位点提交及下一条有效记录继续处理验收，以及健康状态、
+处理器部署和真实 Kafka→Elasticsearch 端到端链路仍待实现。现有 Kafka 消费及
+pipeline token 可通过
 `make kafka-consumer-integration` 复现；该命令创建唯一临时主题、两个消费者组，
 并向 Kafka Pod 复制两个临时测试二进制。成功退出时会删除并确认这些资源均不存在。

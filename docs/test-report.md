@@ -734,7 +734,8 @@ ParseFilebeat
 → Commit 成功后返回端到端成功
 ```
 
-永久无效事件当前还没有 DLQ 写入路径，因此保持未提交；逐项或请求级可重试错误返回
+`Processor` 和 `DeliveryCycle` 仍不直接写 DLQ；其永久无效结果保持未提交，可交给
+独立 `DeadLetterHandler` 处理，运行循环接线仍待实现。逐项或请求级可重试错误返回
 `retryable_failure`，配置、协议、结果数量和未知结果返回 `system_failure`。
 写入取消返回 `canceled`。如果 Elasticsearch 已返回 `created`/`duplicate`，但
 Kafka Commit 失败，则返回 `commit_failure` 并保留原记录，不会把 ES 落盘成功
@@ -798,8 +799,46 @@ coverage: 91.4% of statements
 变化，证明稳定的是事件 `_id`，不是包含 `ingested_at` 的整份文档。结果契约还会
 拒绝 `ResultKind`、Elasticsearch 逐项结果、错误返回与提交状态之间的矛盾组合。
 
-本节仍未连接真实 Elasticsearch，也未实现 Poll 循环、DLQ、多记录或多分区连续
-前缀、健康接口、进程生命周期、部署或端到端恢复；有界周期尚未接入持续消费进程。
+本节仍未连接真实 Elasticsearch，也未实现 Poll 循环、多记录或多分区连续前缀、
+健康接口、进程生命周期、部署或端到端恢复；有界周期和下述 DLQ 边界均尚未接入
+持续消费进程。
+
+### Go 永久无效记录 DLQ 单元边界
+
+2026-08-04 按 ADR-002 增加单条永久无效记录的死信边界。测试先行阶段，聚焦命令
+分别因 `BestEffortTestRunID`、`DeadLetterProducer` 和 `DeadLetterHandler` 尚未
+定义而构建失败；补入最小实现后形成三个清晰职责：`internal/event` 只尽力提取
+排障用 `test_run_id`，`internal/kafka` 使用独立 franz-go 客户端同步写入固定主题，
+`internal/pipeline` 编排死信发布和原始源记录提交。
+
+DLQ JSON 使用 `schema_version=1`，记录源 topic/partition/offset、固定类别
+`event_validation`、受控字段名和固定安全摘要、实际尝试次数、可选
+`test_run_id` 以及 Base64 编码的原始字节。Kafka key 使用版本化源坐标
+`v1|<主题字节长度>:<主题>|<分区>|<位点>`。Base64 只保证任意字节无损往返，
+不是脱敏或加密；原始载荷仍受项目数据规则约束。
+
+处理顺序严格为 publish→commit。发布失败、超时、取消或确认不确定时，源位点
+不会提交；发布确认后父 context 取消也不会提交。发布成功但源提交失败时返回
+`Published=true, Committed=false`，同一次处理不会重复发布。错误链保留外部原因，
+错误文本和安全摘要均不包含原始载荷或校验原因中的原始值。
+
+最终验证证据：
+
+```text
+go test -count=1 -race -cover ./internal/event ./internal/kafka ./internal/pipeline
+ok  github.com/Donking-36/distributed-log-platform/internal/event     coverage: 97.6%
+ok  github.com/Donking-36/distributed-log-platform/internal/kafka     coverage: 84.7%
+ok  github.com/Donking-36/distributed-log-platform/internal/pipeline  coverage: 91.3%
+
+GO=/usr/local/go/bin/go GOFMT=/usr/local/go/bin/gofmt make check
+通过：版本、格式、Shell、Python fixture、vet、全量测试、构建和主题初始化器自测
+```
+
+本节只验证单元边界，尚未覆盖真实 Kafka 的 DLQ Broker 确认、源消费者组位点、
+毒消息后下一条有效记录继续处理、DLQ 重试或 Poll 运行循环接线。Base64 会使原始
+载荷增大约三分之一，当前也尚未为源主题、DLQ 主题与 franz-go producer 对齐明确的
+最大消息边界；真实 Kafka DLQ 验收前必须先固定该限制并覆盖边界值，避免大毒消息
+能够进入源主题却无法进入 DLQ。
 
 ### 当前边界
 
@@ -812,5 +851,5 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
 Broker 位点复核；但 Elasticsearch 仍是替身，尚未覆盖真实 Kafka→Elasticsearch
 联动、多记录/多分区连续前缀位点推进、真实重平衡、提交失败或响应丢失后的真实
-恢复、有界投递周期接入真实处理循环、DLQ、健康接口、处理器部署、端到端恢复
-以及 Grafana 查询链路。
+恢复、有界投递周期接入真实处理循环、真实 Kafka DLQ 联动及持续处理循环接入、
+健康接口、处理器部署、端到端恢复以及 Grafana 查询链路。

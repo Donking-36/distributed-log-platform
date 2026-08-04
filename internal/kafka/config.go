@@ -24,18 +24,8 @@ type Config struct {
 }
 
 func (config Config) validate() error {
-	if len(config.Brokers) == 0 {
-		return errors.New("Kafka brokers 不能为空")
-	}
-	seenBrokers := make(map[string]struct{}, len(config.Brokers))
-	for index, broker := range config.Brokers {
-		if err := validateBroker(broker); err != nil {
-			return fmt.Errorf("Kafka broker[%d]: %w", index, err)
-		}
-		if _, exists := seenBrokers[broker]; exists {
-			return fmt.Errorf("Kafka broker 不能重复: %q", broker)
-		}
-		seenBrokers[broker] = struct{}{}
+	if err := validateBrokers(config.Brokers); err != nil {
+		return err
 	}
 
 	if strings.TrimSpace(config.GroupID) == "" {
@@ -57,6 +47,23 @@ func (config Config) validate() error {
 			return fmt.Errorf("Kafka topic 不能重复: %q", topic)
 		}
 		seenTopics[topic] = struct{}{}
+	}
+	return nil
+}
+
+func validateBrokers(brokers []string) error {
+	if len(brokers) == 0 {
+		return errors.New("Kafka brokers 不能为空")
+	}
+	seenBrokers := make(map[string]struct{}, len(brokers))
+	for index, broker := range brokers {
+		if err := validateBroker(broker); err != nil {
+			return fmt.Errorf("Kafka broker[%d]: %w", index, err)
+		}
+		if _, exists := seenBrokers[broker]; exists {
+			return fmt.Errorf("Kafka broker 不能重复: %q", broker)
+		}
+		seenBrokers[broker] = struct{}{}
 	}
 	return nil
 }
