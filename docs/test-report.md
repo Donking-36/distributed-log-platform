@@ -643,6 +643,41 @@ Minikube 外层容器约 4.01 GiB/6 GiB。当前仍有余量，但后续 `log-pr
 `git diff --check` 均通过。本节只证明 Elasticsearch 服务端和映射/幂等契约，
 尚未证明 Kafka 消费、DLQ、提交位点或端到端恢复。
 
+### Go Elasticsearch Bulk 写入边界与真实冒烟
+
+2026-08-04 新增 `internal/elasticsearch`，固定官方
+`github.com/elastic/go-elasticsearch/v9 v9.4.2` 和其 transport
+`elastic-transport-go/v8 v8.9.0`。`NewDocument` 把规范事件转换为不可变的 14 个
+叶子字段，事件时间与 `ingested_at` 统一为 UTC，并保证 Bulk `_id` 与文档
+`event_id` 完全一致；原始业务 JSON 不作为额外字段写入。
+
+`CreateBatch` 每次只发送一次 `_bulk`，NDJSON 只使用 `create`，并以输入顺序和
+`_id` 双重核对逐项响应。201 分类为 `created`，错误类型明确为
+`version_conflict_engine_exception` 的 409 分类为 `duplicate`，429/5xx 分类为
+`retryable_failure`。权限、索引、文档解析、严格映射及未知错误保守分类为
+`system_failure`：当前文档结构由代码固定，后两者更可能表示模板或代码漂移，
+不能误当毒消息写入 DLQ 后推进 Kafka 位点。永久无效事件仍由 `internal/event`
+和 `NewDocument` 在发出请求前拒绝。
+
+请求级 408/429/5xx、transport 或响应体读取中断没有可信逐项结果；其中临时故障
+通过可重试 `RequestError` 返回。畸形 JSON、响应数量、动作、ID 或 `errors` 汇总
+不一致均返回 `nil, error`，调用方不得据此确认任何记录。官方 transport 自动
+重试已关闭，并由本地 HTTP 服务器反例证明 503 时只发送一次请求；响应正常、
+读取失败以及 transport 同时返回 response/error 的路径都验证了 body 关闭。
+
+通过临时 `kubectl port-forward` 对实际 Elasticsearch 9.4.4 运行带 integration
+构建标签的 Go 测试，批次
+`logs-stage3-go-client-smoke-20260804t034434z` 得到：
+
+```text
+first=201/created
+second=409/duplicate
+count=1
+```
+
+测试结束后临时索引查询为空，Elasticsearch Pod 仍 Ready、0 重启，集群 green。
+`go test -race -cover ./internal/elasticsearch` 通过，语句覆盖率为 86.8%。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -650,5 +685,6 @@ Minikube 外层容器约 4.01 GiB/6 GiB。当前仍有余量，但后续 `log-pr
 Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的有界故障窗口内，
 同一 PVC 上故障前位点连续可读并继续推进，新产生的 40 条日志恢复后完整投递。
 它不代表多节点故障转移、任意长中断、队列饱和、节点磁盘丢失、TLS/SASL 或
-生产容量；Elasticsearch 服务端基线已经覆盖，但尚未覆盖 `log-processor` 的
-Kafka→Elasticsearch 写入、DLQ、消费者恢复以及 Grafana 查询链路。
+生产容量；Elasticsearch 服务端和 Go Bulk 写入边界已经覆盖，但尚未覆盖 Kafka
+拉取、连续前缀位点提交、真正的六次退避、DLQ、重平衡、健康接口、处理器部署、
+端到端恢复以及 Grafana 查询链路。

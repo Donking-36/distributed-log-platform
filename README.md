@@ -429,7 +429,9 @@ UID、PVC UID/PV 和 Cluster ID 保持，故障前位点连续可读并在恢复
 
 Elasticsearch 9.4.4 已以单节点 StatefulSet 部署，5 GiB PVC、ClusterIP、
 Restricted 安全上下文、只读根、1 GiB 堆和镜像身份均已验证。索引模板的 14 个
-字段类型、1 分片/0 副本以及 `dynamic: strict` 已生效；真实 Bulk `create` 首次
-返回 201，同一 `_id` 重复创建返回单项 409，索引内仍只有 1 个文档。该证据只
-证明 Elasticsearch 服务端契约，尚未证明 `log-processor` 的 Kafka 消费与端到端
-写入。
+字段类型、1 分片/0 副本以及 `dynamic: strict` 已生效。`internal/elasticsearch`
+现已使用官方 Go v9.4.2 客户端完成不可变的 14 字段文档转换、Bulk `create` 编码
+和逐项结果分类；真实 9.4.4 冒烟首次返回 `201/created`，同一 `_id` 重复写入返回
+`409/duplicate`，索引内仍只有 1 个文档，临时索引已删除。该证据已经覆盖
+Go→Elasticsearch 写入边界；Kafka 消费、位点提交、退避、DLQ 和完整
+`log-processor` 进程尚未实现。
