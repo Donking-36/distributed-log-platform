@@ -135,7 +135,7 @@ build:
 kafka-topic-initializer-test:
 	@bash deploy/kubernetes/base/kafka-topics/initialize-topics.sh self-test
 
-# kafka-consumer-integration 在真实 Kafka 4.3.1 上验证未提交重投和显式提交续读，并清理唯一临时资源。
+# kafka-consumer-integration 验证续读及 Poll→pipeline→Commit 的原始记录身份，并清理唯一临时资源。
 kafka-consumer-integration: version-check k8s-context-check
 	@scripts/run-kafka-consumer-integration.sh
 
