@@ -1,7 +1,7 @@
 # 架构
 
-- 状态：UC-001A 采集、路由、registry 与有界单 Broker 短停恢复已验证
-- 更新日期：2026-08-03
+- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID 与 Elasticsearch 服务端基线已验证
+- 更新日期：2026-08-04
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
 ## 1. 目标与约束
@@ -99,8 +99,8 @@ Filebeat 根据标签选择 `logs.api-service` 或 `logs.worker-service`，
 也不会作为额外字段写入 Elasticsearch，避免领域标识材料泄漏到存储模型。
 
 Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
-只表示 Filebeat 补充的源文件 `log.offset`。Kafka、Elasticsearch、配置和进程入口
-只在对应职责实现时再建立，不预建空包。
+只表示 Filebeat 补充的源文件 `log.offset`。Kafka 消费者、Elasticsearch 客户端、
+配置和进程入口只在对应职责实现时再建立，不预建空包。
 
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。
@@ -130,6 +130,14 @@ UC-001/UC-002 验收链路全绿之后。
   只包含一个哈希 ConfigMap 和一个 Job，不包含 Broker、Service、Namespace 或
   PVC；因此重新执行主题管理不会隐式滚动 Kafka。固定名 Job 由宿主 runner 在
   校验用途标签和终态后精确重建，完成后保留最近证据。
+- Elasticsearch 使用独立 `local-elasticsearch` overlay 管理单节点 StatefulSet，
+  不随应用或 Kafka 部署隐式更新。普通 `elasticsearch` Service 提供 9200 集群内
+  入口，`elasticsearch-headless` 只提供 StatefulSet 稳定身份，不对外暴露端口。
+- Elasticsearch 使用 5 GiB `ReadWriteOnce` PVC 和 Retain 删除/缩容策略；配置
+  初始化容器复制镜像默认配置，主容器以 UID/GID 1000、只读根和 Restricted
+  安全上下文运行。请求 500m CPU/2 GiB，限制 1500m CPU/2 GiB，固定 1 GiB 堆。
+- 本地 overlay 关闭安全并设置 `node.store.allow_mmap=false`，前者只允许隔离的
+  Minikube，后者避免用特权 initContainer 修改宿主 sysctl；两项都不是生产建议。
 - `log-processor`：配置就绪/存活探针、资源请求/限制、优雅终止，并以非根
   用户运行。
 - `log-producer`：配置资源请求/限制、安全上下文和优雅终止。它没有 Service
@@ -225,11 +233,16 @@ UID，而是标记 `fields.routing_reason=kubernetes_metadata_missing`，使用
 
 - 索引模式：`logs-stage3-*`。
 - `event_id` 用作 Elasticsearch 文档的 `_id`。
-- `@timestamp` 和 `ingested_at` 使用日期类型。
+- `@timestamp` 和 `ingested_at` 使用 `date_nanos`，保留业务日志纳秒精度。
 - 服务、级别、命名空间、Pod UID、容器 ID 和测试批次字段在作为查询维度时
   使用精确匹配映射。
 - `message` 支持全文检索。
-- 索引模板和映射保存在仓库中。
+- `event.sequence` 与 `log.offset` 使用 `long`，其余未声明字段由
+  `dynamic: strict` 拒绝，防止动态映射悄悄改变查询契约。
+- 项目模板名为 `logs-stage3-v1`，使用 1 分片、0 副本和优先级 501；后者明确高于
+  Elasticsearch 自带的 `logs-*-*` 优先级 100 模板。
+- 模板和映射保存在仓库，由独立 Make 入口经标准输入交给 Pod 内 `curl` 幂等
+  应用；不创建模板 Job 或 ConfigMap，部署 StatefulSet 本身不会隐式修改模板。
 
 Grafana 的明细、级别分布以及 ERROR/WARN 时间趋势使用同一个
 Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
@@ -273,10 +286,10 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | containerd | 集群已验证：2.2.1 | 节点运行时输出 |
 | Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、Broker/初始化 Job 运行时 imageID、主题初始化幂等性、同一 PVC 上的主题元数据恢复及 Filebeat 集群内生产/消费通过；受控 1→0→1 短停后 StatefulSet、PVC 和 Cluster ID 保持，故障前位点连续可读并继续推进，故障窗口内 40 条日志恢复完成；不代表多节点高可用或无限中断 |
 | Filebeat 镜像 | 已验证：`docker.elastic.co/beats/filebeat-wolfi:9.4.4@sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca` | 上游 linux/amd64 manifest `sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379`；节点转换后 manifest/config 为 `sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9` / `sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf`；Kafka 客户端协议固定为 Filebeat 支持的 `4.1.0` 并连接 Kafka 4.3.1；配置、运行时 imageID、正常/兜底路由、registry Pod 重建和有界 Kafka 短停恢复门禁均通过 |
-| Elasticsearch 镜像 | 待定 | 健康、模板、索引和查询冒烟测试通过后固定镜像标签和摘要 |
+| Elasticsearch 镜像 | 已验证：Elastic Team 维护的 Docker Official Image `docker.io/library/elasticsearch:9.4.4@sha256:7de2137b43d9f263cffe51f139a9f3144da7b9941de615fb4317fc539f4d16a7` | linux/amd64 清单摘要 `sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c`；节点旁加载后的 manifest/config 为 `sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677` / `sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640`；版本/健康、Restricted 运行时、模板映射和 Bulk `create` 201/重复 409 冒烟通过；仅为关闭安全的本地单节点基线 |
 | Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
 | Go Kafka 客户端 | 待定 | 仅在 Kafka 协议冒烟测试通过后选定，并记录理由 |
-| Go Elasticsearch 客户端 | 待定 | 在 Elasticsearch 主版本确定后选定；客户端主版本必须匹配 |
+| Go Elasticsearch 客户端 | 待定 | 只考虑官方 v9 客户端；在处理器真实 Bulk 逐项响应和错误分支冒烟通过后固定具体版本 |
 
 “待定”不是可部署版本。任何清单都不得使用 `latest`。每个镜像选定后，
 必须记录精确的镜像标签、摘要、来源文档和冒烟测试结果，才能替换“待定”。

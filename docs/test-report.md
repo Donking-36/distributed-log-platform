@@ -601,6 +601,48 @@ ID 测试覆盖 UTF-8 固定向量、原始业务 JSON 保持、相同时刻跨�
 `internal/event` 语句覆盖率为 97.3%。本验证只证明纯函数契约，尚未声明 Kafka
 消费、Elasticsearch 写入或端到端幂等已经完成。
 
+### Elasticsearch 9.4.4 单节点基线与幂等契约
+
+2026-08-04 固定 Elastic Team 维护的 Docker Official Image
+`docker.io/library/elasticsearch:9.4.4`。上游多架构索引摘要为
+`sha256:7de2137b43d9f263cffe51f139a9f3144da7b9941de615fb4317fc539f4d16a7`，
+linux/amd64 清单摘要为
+`sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c`；
+旁加载到 Minikube 后实际 manifest/config 摘要为
+`sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677` /
+`sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640`。
+部署前、初始化容器和主容器运行时三处身份门禁均通过。
+
+单节点 StatefulSet 使用 5 GiB Retain PVC、ClusterIP/Headless Service、500m
+CPU/2 GiB 请求、1500m CPU/2 GiB 上限和 1 GiB 固定堆。初始化容器复制镜像默认
+配置后，主容器以 UID/GID 1000、只读根、无 ServiceAccount token 和 Restricted
+安全上下文运行；data、config、logs、tmp 四个约定的应用目录均可写。运行时确认
+`discovery.type=single-node`、`node.store.allow_mmap=false` 和仅本地
+`xpack.security.enabled=false` 均生效，Pod Ready、0 重启，集群为 green。
+
+索引模板第一次使用优先级 100 时被服务端拒绝，因为 9.4.4 自带的 `logs-*-*`
+模板同为优先级 100。没有降低检查或关闭内置模板；按官方冲突规则把项目模板提高
+到 501 后，`logs-stage3-v1` 成功应用。最终模板固定 14 个最小契约字段，时间使用
+`date_nanos`，查询维度使用 `keyword`，正文使用 `text`，序号和源 offset 使用
+`long`，并设置 `dynamic: strict`、1 分片和 0 副本。
+
+最终合约批次 `logs-stage3-contract-smoke-20260804t030559z` 首次 Bulk `create`
+返回 201；使用同一 `_id` 再次创建返回单项 409
+`version_conflict_engine_exception`。索引中唯一文档数保持 1，14 个字段的实际映射、
+1 分片/0 副本和 green 状态逐项通过。临时索引已精确删除。早期实现把模板放入
+哈希 ConfigMap，模板修正后留下不再引用的旧对象；最终取消这层中转，由 Make
+把仓库 JSON 经标准输入发送给 Pod 内 `curl`，两个验证期 ConfigMap 均删除，模板
+变化也不再触发无意义的 StatefulSet 滚动更新。部署 overlay 与集群
+`kubectl diff` 为空。
+
+空闲时 Elasticsearch 容器 cgroup 使用约 1.34 GiB/2 GiB，Kafka 约 623 MiB；
+Minikube 外层容器约 4.01 GiB/6 GiB。当前仍有余量，但后续 `log-processor` 必须
+保持小资源请求/上限，不能把此冒烟外推为生产容量结论。
+
+`make check`、`go test -race -cover ./...`、服务端 dry-run、节点/Pod 镜像门禁和
+`git diff --check` 均通过。本节只证明 Elasticsearch 服务端和映射/幂等契约，
+尚未证明 Kafka 消费、DLQ、提交位点或端到端恢复。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -608,5 +650,5 @@ ID 测试覆盖 UTF-8 固定向量、原始业务 JSON 保持、相同时刻跨�
 Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的有界故障窗口内，
 同一 PVC 上故障前位点连续可读并继续推进，新产生的 40 条日志恢复后完整投递。
 它不代表多节点故障转移、任意长中断、队列饱和、节点磁盘丢失、TLS/SASL 或
-生产容量，也尚未覆盖
-`log-processor`、Elasticsearch 与 Grafana 的后半段链路。
+生产容量；Elasticsearch 服务端基线已经覆盖，但尚未覆盖 `log-processor` 的
+Kafka→Elasticsearch 写入、DLQ、消费者恢复以及 Grafana 查询链路。
