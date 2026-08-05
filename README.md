@@ -69,9 +69,9 @@ PRODUCER_INTERVAL=10ms \
 go run ./cmd/log-producer
 ```
 
-`log-processor` 已提供可编译的持续运行入口。它严格串行执行
-`Poll → 有界投递 → 必要时写入 DLQ → 源位点提交`，当前记录未得到提交确认时
-不会拉取下一条。启动配置如下：
+`log-processor` 已提供可编译的持续运行入口。正常事件按批拉取并通过一次
+Elasticsearch Bulk 写入，整批成功后再提交 Kafka 位点；遇到永久无效事件时，
+在写入前降级到原有逐条 DLQ 路径并保持顺序。未确认批次不会被越过。启动配置如下：
 
 | 环境变量 | 必填 | 默认值 | 作用 |
 |---|---|---|---|
@@ -80,6 +80,7 @@ go run ./cmd/log-producer
 | `PROCESSOR_KAFKA_TOPICS` | 是 | 无 | 逗号分隔的源主题；禁止包含 `logs.dlq` |
 | `PROCESSOR_ELASTICSEARCH_ENDPOINT` | 是 | 无 | Elasticsearch HTTP(S) 地址 |
 | `PROCESSOR_ELASTICSEARCH_INDEX` | 是 | 无 | 写入索引名 |
+| `PROCESSOR_BATCH_SIZE` | 否 | `500` | 单次拉取和 Bulk 写入上限，允许 1～5000 |
 | `PROCESSOR_WRITE_TIMEOUT` | 否 | `10s` | 单次 Elasticsearch 写入超时 |
 | `PROCESSOR_COMMIT_TIMEOUT` | 否 | `10s` | Kafka 源位点提交超时 |
 | `PROCESSOR_DLQ_PUBLISH_TIMEOUT` | 否 | `10s` | DLQ 发布确认超时 |
@@ -145,25 +146,25 @@ Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主�
 Pod-only RBAC；`base/elasticsearch` 保存单节点 StatefulSet、Service、PVC 契约
 和索引模板；`base/grafana` 保存日志数据源、仪表盘、Deployment 和 ClusterIP
 Service。应用及第三方组件的镜像身份由固定摘要或本地旁加载门禁约束。
-持续应用、验收 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
-`overlays/local-acceptance`、`overlays/local-kafka`、`overlays/local-kafka-topics`、
+持续应用、验收 Job、吞吐 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
+`overlays/local-acceptance`、`overlays/local-throughput`、`overlays/local-kafka`、`overlays/local-kafka-topics`、
 `overlays/local-filebeat`、`overlays/local-elasticsearch`、
 `overlays/local-grafana`，共享基础定义但独立运行，避免应用、采集、主题或搜索
 存储操作隐式改动其他组件、Namespace 或 PVC。
 
-本地 overlay 的 producer 固定为 `d20fc7f`，processor 固定为 `9a776ee`。首次
+本地 overlay 的 producer 固定为 `d20fc7f`，processor 固定为 `84073f7`。首次
 部署前，先确认两个镜像存在并旁加载到 Minikube：
 
 ```bash
 docker image inspect distributed-log-platform/log-producer:d20fc7f
-docker image inspect distributed-log-platform/log-processor:9a776ee
+docker image inspect distributed-log-platform/log-processor:84073f7
 
 minikube image load \
   -p stage3-logs \
   distributed-log-platform/log-producer:d20fc7f
 minikube image load \
   -p stage3-logs \
-  distributed-log-platform/log-processor:9a776ee
+  distributed-log-platform/log-processor:84073f7
 
 make k8s-render
 make k8s-validate
@@ -196,6 +197,25 @@ make k8s-processor-acceptance \
 恢复 Deployment 副本数，最后复核 UID、owner、overlay 和唯一 Pod；不创建临时
 Kubernetes 资源。两条带唯一 `test_run_id` 的 ES 文档作为证据保留，Kafka fixture
 由主题 24 小时保留策略清理。
+
+### 每秒 1000+ 条吞吐验收
+
+处理器、Filebeat、Kafka 和 Elasticsearch 全部就绪后执行：
+
+```bash
+make perf
+```
+
+该入口创建两个一次性 Job，每个服务以 1ms 间隔产生 60000 条日志。计时从创建
+Job 开始，到 Elasticsearch 精确收到 120000 个唯一文档且处理器消费者组 LAG=0
+为止，包含 Kubernetes 调度、标准输出、Filebeat、Kafka、批量处理、ES 写入和
+Kafka 提交开销。硬性通过条件是实际吞吐不少于 1000 条/秒，同时输入数等于 ES
+唯一文档数、处理错误为 0、处理器 0 重启且最终 LAG=0。成功后删除两个大日志 Job，
+按唯一 `run_id` 隔离的 ES 证据文档保留。
+
+2026-08-05 的 4 CPU/6 GiB 本机实测为 120000 条、83.877 秒、1430.66 条/秒，
+ES 唯一文档 120000、处理错误 0、最终 LAG=0。该结果只证明声明环境，不外推为
+生产容量。
 
 ### Grafana 日志检索
 
@@ -553,16 +573,15 @@ Restricted 安全上下文、只读根、1 GiB 堆和镜像身份均已验证。
 `409/duplicate`，索引内仍只有 1 个文档，临时索引已删除。该证据已经覆盖
 Go→Elasticsearch 写入边界。
 
-`internal/kafka` 已固定 `franz-go v1.21.5`，建立一次只拉取一条记录的最小消费
-边界：自动提交关闭，调用方只有显式确认当前记录后才能拉取下一条；提交失败会
-保留当前记录，关闭消费者不会隐式推进位点。真实 Kafka 4.3.1 验收证明同一
+`internal/kafka` 已固定 `franz-go v1.21.5`，建立受私有令牌保护的批量消费边界：
+自动提交关闭，正常路径整批提交，DLQ 降级路径只能按原顺序提交批首；提交失败会
+保留整个待确认批次，关闭消费者不会隐式推进位点。真实 Kafka 4.3.1 验收证明同一
 消费者组关闭前未确认的位点会被再次读取，显式确认后重启则从下一位点继续。
 
-`internal/pipeline` 已建立单记录编排。`Processor` 负责一次处理：解析 Kafka value、
-构造不可变文档、执行一次 Elasticsearch Bulk `create`，并且只在逐项结果为
-`created` 或 `duplicate` 时提交原始 Kafka 记录。Elasticsearch 写入与 Kafka
-提交使用独立超时；永久无效、可重试、系统故障和取消均不提交，ES 已接受但
-Kafka 提交失败则返回独立的 `commit_failure`，不会误报整条记录成功。
+`internal/pipeline` 同时保留单条安全路径和批量快路径。`BatchProcessor` 先解析
+整批，再执行一次 Elasticsearch Bulk `create`；只有全部逐项结果为 `created` 或
+`duplicate` 才提交整批。永久无效记录在任何 ES 写入前触发逐条降级；部分可重试、
+系统故障、取消和提交不确定均不会越过批次，重放依靠稳定 `_id` 收敛。
 
 `DeliveryCycle` 在此基础上按 ADR-002 对同一原始记录执行最多六次完整尝试，
 只重试 `retryable_failure` 和 `commit_failure`。五次等待上限固定为 250 ms、
@@ -580,9 +599,9 @@ DLQ 记录使用稳定的源坐标 key，原始载荷以 Base64 无损保存；�
 受控字段名和固定文案，不复制原始值。该边界已覆盖发布失败、取消和源提交失败，
 并已在下述真实联动验收中接入 Kafka。
 
-`Runner` 已把 Poll、有界投递和 DLQ 接成严格串行循环：正常投递只有源位点已提交
-才继续；只有永久无效记录进入 `DeadLetterHandler`，且 DLQ 发布和源位点提交均
-确认后才继续；任何其他未解决错误都会在下一次 Poll 前停止。`cmd/log-processor`
+`BatchRunner` 已把批量 Poll、有界投递和单条 DLQ 降级连接起来：正常批次只有源
+位点已提交才继续；永久无效记录严格按原顺序进入既有 `DeadLetterHandler`；任何
+其他未解决错误都会在下一次 Poll 前停止。`cmd/log-processor`
 已完成环境校验、真实依赖组装、SIGINT/SIGTERM 正常停止和 10 秒有界资源关闭。
 
 `make kafka-consumer-integration` 现在同时复现消费续读、pipeline token 和真实
@@ -590,5 +609,5 @@ Runner 联动：唯一源主题按“有效→永久无效→有效”写入三�
 Runner 组提交点为 3、Elasticsearch 只有两条确定性 ID 文档、`logs.dlq` 恰好新增
 一条且 envelope/Base64 原文正确。临时主题、三个消费者组、临时 ES 索引和测试
 二进制都会删除并复核；共享 `logs.dlq` 的验收记录不被危险截断，由 24 小时保留
-策略清理。健康接口已完成进程内状态和协同退出验证；处理器镜像、Kubernetes
-部署、重复投递幂等和 Pod 重启恢复仍待实现。
+策略清理。健康接口、处理器镜像、Kubernetes 部署、重复投递幂等、Pod 重启恢复
+和完整链路每秒 1000+ 条吞吐门禁均已通过。

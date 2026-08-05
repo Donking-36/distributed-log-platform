@@ -70,7 +70,7 @@ git status --short --branch
 
 docker image inspect \
   distributed-log-platform/log-producer:d20fc7f \
-  distributed-log-platform/log-processor:9a776ee \
+  distributed-log-platform/log-processor:84073f7 \
   apache/kafka:4.3.1 \
   docker.elastic.co/beats/filebeat-wolfi:9.4.4 \
   elasticsearch:9.4.4 \
@@ -94,7 +94,7 @@ git bundle create \
 docker save \
   --output ~/stage3-demo-transfer/stage3-images.tar \
   distributed-log-platform/log-producer:d20fc7f \
-  distributed-log-platform/log-processor:9a776ee \
+  distributed-log-platform/log-processor:84073f7 \
   apache/kafka:4.3.1 \
   docker.elastic.co/beats/filebeat-wolfi:9.4.4 \
   elasticsearch:9.4.4 \
@@ -296,7 +296,7 @@ docker load --input stage3-images.tar
 ```bash
 docker image inspect \
   distributed-log-platform/log-producer:d20fc7f \
-  distributed-log-platform/log-processor:9a776ee \
+  distributed-log-platform/log-processor:84073f7 \
   apache/kafka:4.3.1 \
   docker.elastic.co/beats/filebeat-wolfi:9.4.4 \
   elasticsearch:9.4.4 \
@@ -354,7 +354,7 @@ minikube image load -p stage3-logs --daemon=true \
   distributed-log-platform/log-producer:d20fc7f
 
 minikube image load -p stage3-logs --daemon=true \
-  distributed-log-platform/log-processor:9a776ee
+  distributed-log-platform/log-processor:84073f7
 
 minikube image load -p stage3-logs --daemon=true \
   apache/kafka:4.3.1
@@ -551,6 +551,17 @@ make k8s-processor-acceptance \
 
 Grafana 和处理器验收会修改 Pod 或副本数，必须串行执行，不要在两个终端同时运行。
 
+### 11.7 可选：演示每秒 1000+ 条吞吐
+
+```bash
+make perf
+```
+
+该命令运行约 1～2 分钟，固定产生 120000 条日志，并输出实际吞吐、ES 唯一文档
+数、错误数、处理器重启数和最终 LAG。通过标准为不少于 1000 条/秒且数量完全
+一致。成功后自动删除两个大日志 Job，ES 中按唯一 `run_id` 隔离的证据文档保留。
+该入口也使用共享验收锁，应与 Grafana、处理器和 Filebeat 验收串行执行。
+
 ## 12. 常见问题
 
 ### 12.1 `go: command not found` 或版本不匹配
@@ -664,5 +675,6 @@ kubectl --context=stage3-logs get pods -n stage3-collector
 - [ ] 两个日志源能输出 JSON，Elasticsearch 能查到最新文档；
 - [ ] Grafana 端口转发和仪表盘可以打开；
 - [ ] 固定数据集验收命令已经单独试跑；
+- [ ] 若演示吞吐，`make perf` 已单独试跑且结果不少于 1000 条/秒；
 - [ ] 演示时不并行执行两个会替换 Pod 的验收入口；
 - [ ] 演示结束使用 `minikube stop`，不误删配置档。

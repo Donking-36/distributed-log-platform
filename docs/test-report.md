@@ -1165,6 +1165,34 @@ new_pod_uid=5dc7178e-8308-4c74-ad76-cc903eef13c9
 UID/副本数/owner 和 overlay 精确恢复。
 旧 ConfigMap 哈希在确认未被 Deployment 引用后删除，最终只保留三个当前配置。
 
+### 完整链路每秒 1000+ 条吞吐
+
+处理器增加批量快路径后，镜像 `log-processor:84073f7` 已通过节点 manifest/config
+摘要门禁并部署。`make perf` 使用两个一次性 Job，各以 1ms 间隔产生 60000 条
+结构化日志；计时从 Job 创建开始，到 ES 唯一文档数精确相等且消费者组 LAG=0
+结束，因此覆盖调度、容器 stdout、Filebeat、Kafka、Go 批量处理、ES Bulk 和
+Kafka 位点提交。
+
+首轮链路已经收齐 120000 个唯一文档并归零 LAG，但完整读取 `kubectl logs` 时只
+得到序号 53704～60000：这是容器运行时约 10 MiB stdout 轮转，不是链路丢失。
+验收随后改为结合固定 Job count、Job 成功、ES 精确数量、末尾连续 JSON 样本和
+最终 LAG，避免把正常轮转误判为失败。对应三项校验器单测已通过。
+
+最终证据：
+
+```text
+run_id=perf-20260805t082838z-434544
+processor_pod=log-processor-f77f9474-xbnvf ready=true restarts=0
+configured_generation_seconds=60
+input_events=120000 elasticsearch_unique_documents=120000
+elapsed_seconds=83.877 throughput_events_per_second=1430.66
+average_event_bytes_sample=193.4 processing_errors=0 consumer_group_lag=0
+cleanup=两个吞吐 Job 已删除；Elasticsearch 证据文档按 run_id 保留
+```
+
+结果达到每秒 1000+ 条硬性门禁。它只证明 WSL2 Minikube 4 CPU/6 GiB、当前固定
+镜像、约 193.4 字节事件和 60 秒生成窗口，不代表生产容量。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -1172,11 +1200,11 @@ UID/副本数/owner 和 overlay 精确恢复。
 Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的有界故障窗口内，
 同一 PVC 上故障前位点连续可读并继续推进，新产生的 40 条日志恢复后完整投递。
 它不代表多节点故障转移、任意长中断、队列饱和、节点磁盘丢失、TLS/SASL 或
-生产容量；Elasticsearch 服务端、Go Bulk 写入和 Kafka 单条显式提交边界已经覆盖，
+生产高可用；Elasticsearch 服务端、Go Bulk 写入和 Kafka 显式提交边界已经覆盖，
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
 Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
 Kafka、Elasticsearch 和 DLQ；持续 Deployment 还通过了重复投递和 Pod 重建续读。
-尚未覆盖多记录/多分区连续前缀、真实重平衡、提交失败或响应丢失后的真实恢复、
-大载荷与生产容量。Grafana 查询链路的声明式部署、固定数据集过滤、数量一致性、
+批量快路径及 120000 条完整链路吞吐已经覆盖；尚未覆盖多副本真实重平衡、提交
+失败或响应丢失后的真实恢复、大载荷与生产容量。Grafana 查询链路的声明式部署、固定数据集过滤、数量一致性、
 两次性能采样和 Pod 重建恢复均已通过；该本地结果不代表生产查询容量或多实例
 Grafana 高可用。
