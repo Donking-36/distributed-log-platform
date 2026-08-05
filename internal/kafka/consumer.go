@@ -14,8 +14,6 @@ var (
 	ErrRecordPending = errors.New("Kafka 当前记录尚未确认")
 	// ErrRecordNotPending 表示提交目标不是该消费者当前唯一的待确认记录。
 	ErrRecordNotPending = errors.New("Kafka 记录不是当前待确认记录")
-	// ErrNoRecord 表示底层拉取正常结束但没有返回记录。
-	ErrNoRecord = errors.New("Kafka 拉取未返回记录")
 	// ErrConsumerClosed 表示消费者已经关闭。
 	ErrConsumerClosed = errors.New("Kafka 消费者已经关闭")
 	// ErrPollInProgress 表示同一消费者发生了并发拉取。
@@ -83,26 +81,38 @@ func (consumer *Consumer) Poll(ctx context.Context) (Record, error) {
 	consumer.polling = true
 	consumer.mu.Unlock()
 
-	source, err := consumer.client.poll(ctx, 1)
+	defer func() {
+		consumer.mu.Lock()
+		consumer.polling = false
+		consumer.mu.Unlock()
+	}()
 
-	consumer.mu.Lock()
-	defer consumer.mu.Unlock()
-	consumer.polling = false
-	if consumer.closed {
-		return Record{}, ErrConsumerClosed
-	}
-	if err != nil {
-		consumer.client.allowRebalance()
-		return Record{}, fmt.Errorf("拉取 Kafka 记录: %w", err)
-	}
-	if source == nil {
-		consumer.client.allowRebalance()
-		return Record{}, ErrNoRecord
-	}
+	for {
+		source, err := consumer.client.poll(ctx, 1)
 
-	token := &recordToken{source: source}
-	consumer.pending = token
-	return projectRecord(source, token), nil
+		consumer.mu.Lock()
+		if consumer.closed {
+			consumer.mu.Unlock()
+			return Record{}, ErrConsumerClosed
+		}
+		if err != nil {
+			consumer.client.allowRebalance()
+			consumer.mu.Unlock()
+			return Record{}, fmt.Errorf("拉取 Kafka 记录: %w", err)
+		}
+		if source == nil {
+			// franz-go 在重平衡和内部唤醒时可能返回零记录且无错误。
+			// 当前没有业务记录需要保护，先放行重平衡，再继续等待同一 Poll 调用。
+			consumer.client.allowRebalance()
+			consumer.mu.Unlock()
+			continue
+		}
+
+		token := &recordToken{source: source}
+		consumer.pending = token
+		consumer.mu.Unlock()
+		return projectRecord(source, token), nil
+	}
 }
 
 // Commit 同步提交当前记录的下一位点。
