@@ -16,6 +16,7 @@ configMapGenerator:
       - PROCESSOR_KAFKA_TOPICS=logs.api-service,logs.worker-service,logs.unclassified
       - PROCESSOR_ELASTICSEARCH_ENDPOINT=http://elasticsearch:9200
       - PROCESSOR_ELASTICSEARCH_INDEX=logs-stage3-v1
+      - PROCESSOR_BATCH_SIZE=500
 
 generatorOptions:
   labels:

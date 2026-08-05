@@ -30,6 +30,9 @@ func TestLoadConfigParsesRequiredValuesAndDefaults(t *testing.T) {
 	if config.HealthAddress != defaultHealthAddress {
 		t.Fatalf("health address = %q", config.HealthAddress)
 	}
+	if config.BatchSize != defaultBatchSize {
+		t.Fatalf("batch size = %d，期望 %d", config.BatchSize, defaultBatchSize)
+	}
 }
 
 func TestLoadConfigParsesExplicitOptionalValues(t *testing.T) {
@@ -40,6 +43,7 @@ func TestLoadConfigParsesExplicitOptionalValues(t *testing.T) {
 	values[processorCommitTimeoutEnv] = "4s"
 	values[processorDeadLetterPublishTimeoutEnv] = "5s"
 	values[processorHealthAddressEnv] = "127.0.0.1:18080"
+	values[processorBatchSizeEnv] = "750"
 	config, err := loadConfig(processorLookupEnv(values))
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
@@ -51,6 +55,9 @@ func TestLoadConfigParsesExplicitOptionalValues(t *testing.T) {
 	}
 	if config.HealthAddress != "127.0.0.1:18080" {
 		t.Fatalf("health address = %q", config.HealthAddress)
+	}
+	if config.BatchSize != 750 {
+		t.Fatalf("batch size = %d，期望 750", config.BatchSize)
 	}
 }
 
@@ -92,6 +99,9 @@ func TestLoadConfigRejectsUnsafeListsAndOptionalValues(t *testing.T) {
 		{name: "订阅 DLQ", env: processorKafkaTopicsEnv, value: "logs.api-service,logs.dlq", needle: "logs.dlq"},
 		{name: "非法超时", env: processorWriteTimeoutEnv, value: "soon", needle: processorWriteTimeoutEnv},
 		{name: "非正超时", env: processorCommitTimeoutEnv, value: "0s", needle: "大于 0"},
+		{name: "批量大小非数字", env: processorBatchSizeEnv, value: "many", needle: processorBatchSizeEnv},
+		{name: "批量大小为零", env: processorBatchSizeEnv, value: "0", needle: "1 到"},
+		{name: "批量大小超过上限", env: processorBatchSizeEnv, value: "5001", needle: "1 到 5000"},
 		{name: "健康地址缺少端口", env: processorHealthAddressEnv, value: "localhost", needle: "host:port"},
 		{name: "健康地址端口非数字", env: processorHealthAddressEnv, value: ":http", needle: "1 到 65535"},
 		{name: "健康地址端口越界", env: processorHealthAddressEnv, value: ":65536", needle: "1 到 65535"},

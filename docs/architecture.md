@@ -126,9 +126,10 @@ Kafka 消费已经构成第三个稳定外部边界，因此放入 `internal/kaf
   `franz-go v1.21.5` 选项；
 - `record.go`：复制并暴露 topic、partition、offset、key 和 value，通过不导出的
   令牌阻止伪造、跨消费者或重复提交；
-- `consumer.go` 与 `consumer_test.go`：`PollRecords(ctx, 1)` 一次只建立一条待确认
-  记录，只有同步 `CommitRecords` 成功后才清除该状态并允许重平衡；失败可重试
-  同一记录，关闭使用 `CloseAllowingRebalance` 且绝不隐式提交。
+- `consumer.go` 与 `consumer_test.go`：`PollBatch` 按上限建立一批带私有身份令牌的
+  待确认记录；批量成功时一次同步提交整批，单条降级路径只能按原顺序提交批首，
+  防止跨记录越位。只有全部待确认记录清除后才允许重平衡；提交失败保留原批次，
+  关闭使用 `CloseAllowingRebalance` 且绝不隐式提交。
 - `dead_letter_producer.go` 与 `dead_letter_producer_test.go`：使用独立 franz-go
   客户端固定同步写入 `logs.dlq`，显式使用 `acks=all`，只有 Broker 确认后才
   返回成功。
@@ -136,7 +137,7 @@ Kafka 消费已经构成第三个稳定外部边界，因此放入 `internal/kaf
 拉取取消、空结果或 fetch 错误都会先解除可能的重平衡阻塞；同一 fetch 同时包含
 记录和分区错误时，记录不会被丢弃，错误会在处理当前记录后的下一次拉取返回。
 这个包只拥有消费、提交和 DLQ 传输边界，不决定哪些记录应进入 DLQ，也不编排
-DLQ 写入后的源位点确认；多记录或多分区连续前缀、退避和健康状态也不属于这里。
+DLQ 写入后的源位点确认；批量写入决策、退避和健康状态不属于这里。
 
 单条记录的确认策略已经成为三个稳定边界之间的编排职责，因此放入
 `internal/pipeline`，沿用阶段计划中的既有术语，而不堆入
@@ -150,6 +151,12 @@ DLQ 写入后的源位点确认；多记录或多分区连续前缀、退避和�
 - `delivery.go`：对同一原始记录最多执行六次完整 `Process`，只重试
   `retryable_failure`/`commit_failure`；五级等待上限为 250 ms、500 ms、1 s、
   2 s、4 s，使用全抖动并允许父级上下文中断；
+- `batch_processor.go`：先解析整批记录，再用一次 Bulk `create` 写入全部有效文档；
+  只有每个结果都是 `created` 或 `duplicate` 时才一次提交整批。逐项可重试错误或
+  提交响应不确定时整批不提交，后续依靠稳定 `_id` 重放收敛；
+- `batch_delivery.go`：复用单记录相同的六次有界重试预算，对未确认整批进行重放；
+- `batch_runner.go`：正常路径批量处理；发现任一永久无效记录时，在写入前切换到
+  既有单记录路径，严格按原顺序完成有效记录或 DLQ 隔离；
 - `dead_letter.go`：只接受结构化永久校验错误，生成版本化 DLQ JSON 和稳定源坐标
   key，严格执行 publish→commit；发布失败、取消或确认不确定时绝不提交源记录；
 - `dead_letter_test.go`：验证安全摘要、任意字节 Base64 往返、可选元数据、调用
@@ -170,9 +177,10 @@ DLQ 写入后的源位点确认；多记录或多分区连续前缀、退避和�
 Elasticsearch 写入和 Kafka 提交拥有独立的正数超时。提交失败时 Elasticsearch
 可能已经持久化文档，因此结果明确为 `commit_failure`；同一记录重放时再由稳定
 `_id` 的 409 收敛。`Processor` 只表达一次尝试，`DeliveryCycle` 才拥有 ADR-002
-固定的单记录重试预算。pipeline 目前只拥有单条永久无效记录的 DLQ 编排，不拥有
-DLQ 重试、客户端关闭、健康状态或并发多分区调度；`Runner` 负责把现有边界连接成
-最小串行循环，不引入 goroutine 消费或批量位点推进。
+固定的重试预算。批量路径的默认上限为 500 条，最大允许 5000 条；一批中出现
+永久无效记录时必须在任何 Elasticsearch 写入前降级，避免批量部分写入后再逐条
+处理造成复杂状态。pipeline 不拥有 DLQ 重试、客户端关闭、健康状态或任意 worker
+池；业务主题已经各有 3 个分区，是否增加处理器副本只依据实际吞吐证据决定。
 
 Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOffset`
 只表示 Filebeat 补充的源文件 `log.offset`。
@@ -180,10 +188,11 @@ Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOff
 `cmd/log-processor` 只保留命令级职责，并按文件拆分：
 
 - `config.go` 与 `config_test.go`：读取、规范化并校验 Broker、消费者组、源主题、
-  Elasticsearch 地址/索引、三个独立超时和健康监听地址；拒绝重复成员、空成员、
-  非数值或越界端口和订阅 `logs.dlq`，避免死信循环；
-- `app.go` 与 `app_test.go`：按 Consumer→Elasticsearch→DLQ Producer→Processor
-  →DeliveryCycle→DeadLetterHandler→Runner→Health Service 的顺序组装真实依赖。
+  Elasticsearch 地址/索引、批量上限、三个独立超时和健康监听地址；拒绝重复成员、
+  空成员、非数值或越界端口和订阅 `logs.dlq`，避免死信循环；
+- `app.go` 与 `app_test.go`：按 Consumer→Elasticsearch→DLQ Producer→单条/批量
+  Processor→DeliveryCycle→DeadLetterHandler→BatchRunner→Health Service 的顺序
+  组装真实依赖。
   启动中途失败会清理已创建资源；退出时并行启动三个外部客户端的关闭，使 Kafka
   离组阻塞不会阻止 DLQ 与 Elasticsearch 清理，统一等待受 10 秒预算约束；
 - `health.go` 与 `health_test.go`：使用标准库 `net/http` 暴露 `/healthz` 和
@@ -460,8 +469,9 @@ digest。
    到达。单 Kafka Broker 受控缩容 1→0→1 时，同一 StatefulSet、PVC 和 Cluster ID
    保持，Pod 缺席窗口产生的 40 条逻辑事件恢复后全部正确路由，0 条物理重复。
    后续再验证 `log-processor` 重启、演示 Pod 替换、多节点故障转移和更长故障窗口。
-6. 性能：声明事件大小、速率和持续时间，并记录 p50/p95/p99、错误率和
-   唯一文档数。
+6. 性能：硬性门禁是在声明的事件大小、资源和持续时间下，完整链路持续处理速率
+   达到每秒 1000 条以上，同时输入数等于最终唯一文档数、错误数为 0、消费者组
+   最终 LAG 为 0；p50/p95/p99 仅作为可选辅助证据。
 
 仅有“Pod 处于运行状态”、看似有效的 YAML 或能够打开的仪表盘，都不足以
 作为验收证据。
