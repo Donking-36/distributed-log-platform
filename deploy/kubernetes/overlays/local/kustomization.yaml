@@ -6,6 +6,7 @@ namespace: stage3-logs
 resources:
   - ../../base/namespace
   - ../../base/log-producer
+  - ../../base/log-processor
 
 # 本地 overlay 只使用已旁加载到 stage3-logs 的固定提交镜像。
 patches:
@@ -14,6 +15,15 @@ patches:
       version: v1
       kind: Deployment
       labelSelector: app.kubernetes.io/name=log-producer
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: log-processor
     patch: |-
       - op: replace
         path: /spec/template/spec/containers/0/imagePullPolicy
