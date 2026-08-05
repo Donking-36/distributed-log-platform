@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-processor
+  labels:
+    app.kubernetes.io/name: log-processor
+    app.kubernetes.io/instance: log-processor
+    app.kubernetes.io/component: log-processing
+    app.kubernetes.io/part-of: distributed-log-platform
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  progressDeadlineSeconds: 120
+  minReadySeconds: 5
+  # 本地单副本主动重建，避免滚动窗口产生一次无收益的 Kafka 重平衡。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: log-processor
+      app.kubernetes.io/instance: log-processor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: log-processor
+        app.kubernetes.io/instance: log-processor
+        app.kubernetes.io/component: log-processing
+        app.kubernetes.io/part-of: distributed-log-platform
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # 应用运行和外部客户端关闭各有 10 秒预算，额外时间留给 kubelet 调度。
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: log-processor
+          image: distributed-log-platform/log-processor:unconfigured
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: log-processor-runtime
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 1
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+
+components:
+  - ../../components/log-processor-image
+
+# 当前本地依赖均无认证，只有非敏感连接参数需要 ConfigMap；不创建空壳 Secret。
+configMapGenerator:
+  - name: log-processor-runtime
+    literals:
+      - PROCESSOR_KAFKA_BROKERS=kafka:9092
+      - PROCESSOR_KAFKA_GROUP_ID=stage3-log-processor-v1
+      - PROCESSOR_KAFKA_TOPICS=logs.api-service,logs.worker-service,logs.unclassified
+      - PROCESSOR_ELASTICSEARCH_ENDPOINT=http://elasticsearch:9200
+      - PROCESSOR_ELASTICSEARCH_INDEX=logs-stage3-v1
+
+generatorOptions:
+  labels:
+    app.kubernetes.io/name: log-processor
+    app.kubernetes.io/component: log-processing
+    app.kubernetes.io/part-of: distributed-log-platform
+  disableNameSuffixHash: false

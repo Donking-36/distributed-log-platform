@@ -16,6 +16,7 @@ IMAGE_TAG ?= dev
 KUBE_CONTEXT ?= stage3-logs
 KUBE_NAMESPACE ?= stage3-logs
 KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
+PROCESSOR_ROLLOUT_TIMEOUT ?= 180s
 KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
 KUSTOMIZE_KAFKA_OVERLAY ?= deploy/kubernetes/overlays/local-kafka
 KUSTOMIZE_KAFKA_TOPICS_OVERLAY ?= deploy/kubernetes/overlays/local-kafka-topics
@@ -60,6 +61,11 @@ override ELASTICSEARCH_NODE_IMAGE := docker.io/library/elasticsearch:9.4.4
 override EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST := sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677
 override EXPECTED_ELASTICSEARCH_CONFIG_DIGEST := sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640
 
+# 自研镜像旁加载后会转换 manifest；节点摘要与 component 必须在同一提交中更新。
+override PROCESSOR_NODE_IMAGE := docker.io/distributed-log-platform/log-processor:89effa6
+override EXPECTED_PROCESSOR_MANIFEST_DIGEST := sha256:adc2ed89babd8bcf54fc3240e49265d8db8d7543bd0e3a9d4739d09c1da7988b
+override EXPECTED_PROCESSOR_CONFIG_DIGEST := sha256:cd2f4ef5705c4dc8b7ac72964d752ceb143f553ac8e2ef6f2273bd9fd178c5f2
+
 # 镜像校验脚本只读取显式导出的项目参数，不自行维护另一份摘要常量。
 export MINIKUBE KUBECTL KUBE_CONTEXT KUBE_NAMESPACE KAFKA_NODE_IMAGE
 export EXPECTED_KAFKA_MANIFEST_DIGEST EXPECTED_KAFKA_CONFIG_DIGEST
@@ -73,9 +79,11 @@ export FILEBEAT_NODE_IMAGE EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST EXPECTED_FILE
 export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
 export KUSTOMIZE_ELASTICSEARCH_OVERLAY ELASTICSEARCH_ROLLOUT_TIMEOUT ELASTICSEARCH_NODE_IMAGE
 export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGEST
+export PROCESSOR_NODE_IMAGE EXPECTED_PROCESSOR_MANIFEST_DIGEST EXPECTED_PROCESSOR_CONFIG_DIGEST
 
 .PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build validate-image-tag image processor-image \
-	k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
+	k8s-context-check k8s-render k8s-validate k8s-processor-image-check \
+	k8s-processor-runtime-check k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
 	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status k8s-kafka-topics-render \
 	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test \
@@ -200,19 +208,67 @@ k8s-validate: k8s-context-check
 		--dry-run=server \
 		-k $(KUSTOMIZE_OVERLAY)
 
-# k8s-deploy 在服务端 dry-run 通过后，才向明确的项目上下文应用本地 overlay。
-k8s-deploy: k8s-validate
+# k8s-processor-image-check 在写集群前核对节点实际 manifest 与 config 摘要。
+k8s-processor-image-check: k8s-context-check
+	@image_table="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
+		sudo ctr -n k8s.io images list 'name==$(PROCESSOR_NODE_IMAGE)')"; \
+	actual_manifest="$$(printf '%s\n' "$$image_table" | \
+		awk -v image='$(PROCESSOR_NODE_IMAGE)' 'NR > 1 && $$1 == image { print $$3; exit }')"; \
+	if [ "$$actual_manifest" != "$(EXPECTED_PROCESSOR_MANIFEST_DIGEST)" ]; then \
+		echo "log-processor 节点镜像 manifest 不匹配：实际 $${actual_manifest:-缺失}，要求 $(EXPECTED_PROCESSOR_MANIFEST_DIGEST)"; \
+		exit 1; \
+	fi; \
+	actual_config="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
+		sudo crictl inspecti -o go-template --template '{{.status.id}}' \
+		'$(PROCESSOR_NODE_IMAGE)')"; \
+	actual_config="$$(printf '%s' "$$actual_config" | tr -d '\r')"; \
+	if [ "$$actual_config" != "$(EXPECTED_PROCESSOR_CONFIG_DIGEST)" ]; then \
+		echo "log-processor 节点镜像 config 不匹配：实际 $${actual_config:-缺失}，要求 $(EXPECTED_PROCESSOR_CONFIG_DIGEST)"; \
+		exit 1; \
+	fi; \
+	echo "log-processor 节点镜像身份通过：manifest=$$actual_manifest config=$$actual_config"
+
+# k8s-processor-runtime-check 确认唯一处理器 Pod 使用预期 config 摘要。
+k8s-processor-runtime-check: k8s-context-check
+	@pod_count="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=log-processor \
+		-o name | wc -l | tr -d ' ')"; \
+	if [ "$$pod_count" != "1" ]; then \
+		echo "log-processor Pod 数量为 $$pod_count，要求 1"; \
+		exit 1; \
+	fi; \
+	runtime_image_id="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=log-processor \
+		-o 'jsonpath={.items[0].status.containerStatuses[?(@.name=="log-processor")].imageID}')"; \
+	actual_config="$${runtime_image_id##*@}"; \
+	if [ "$$actual_config" != "$(EXPECTED_PROCESSOR_CONFIG_DIGEST)" ]; then \
+		echo "log-processor Pod 镜像不匹配：实际 $${actual_config:-缺失}，要求 $(EXPECTED_PROCESSOR_CONFIG_DIGEST)"; \
+		exit 1; \
+	fi; \
+	echo "log-processor Pod 运行时镜像身份通过：config=$$actual_config"
+
+# k8s-deploy 通过准入和节点镜像门禁后部署应用，并等待处理器真实就绪。
+k8s-deploy: k8s-validate k8s-processor-image-check
 	$(KUBECTL) \
 		--context=$(KUBE_CONTEXT) \
 		apply \
 		-k $(KUSTOMIZE_OVERLAY)
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		rollout status \
+		deployment/log-processor \
+		-n $(KUBE_NAMESPACE) \
+		--timeout=$(PROCESSOR_ROLLOUT_TIMEOUT)
+	@$(MAKE) --no-print-directory k8s-processor-runtime-check
 
 k8s-status:
 	$(KUBECTL) \
 		--context=$(KUBE_CONTEXT) \
 		get deployments,pods \
 		-n $(KUBE_NAMESPACE) \
-		-l app.kubernetes.io/name=log-producer \
+		-l 'app.kubernetes.io/name in (log-producer,log-processor)' \
 		-o wide
 
 # k8s-kafka-render 只渲染独立的 Kafka overlay，不连接或修改集群。
