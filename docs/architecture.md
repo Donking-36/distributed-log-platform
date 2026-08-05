@@ -240,8 +240,14 @@ UC-001/UC-002 验收链路全绿之后。
   安全上下文运行。请求 500m CPU/2 GiB，限制 1500m CPU/2 GiB，固定 1 GiB 堆。
 - 本地 overlay 关闭安全并设置 `node.store.allow_mmap=false`，前者只允许隔离的
   Minikube，后者避免用特权 initContainer 修改宿主 sysctl；两项都不是生产建议。
-- 计划部署的 `log-processor`：配置就绪/存活探针、资源请求/限制、优雅终止，并以非根
-  用户运行。
+- `log-processor` 使用一个单副本 `Recreate` Deployment。它通过 ConfigMap 连接
+  `kafka:9092` 与 `http://elasticsearch:9200`，消费三个非 DLQ 项目主题并写入
+  `logs-stage3-v1`；当前依赖无认证，因此不创建无敏感值的 Secret。
+- processor 的 startup/readiness/liveness 分别调用 `/healthz`、`/readyz`、
+  `/healthz`；请求 100m CPU/128 MiB，限制 500m CPU/256 MiB，终止宽限为 30 秒。
+  Pod 禁用 ServiceAccount token 与 Service 环境变量，以 UID/GID 10001、只读根、
+  RuntimeDefault seccomp 和全 capability drop 运行。它没有对外服务面，因此不创建
+  Kubernetes Service。
 - `log-producer`：配置资源请求/限制、安全上下文和优雅终止。它没有 Service
   或流量入口，进程退出已由 kubelet 感知，因此不添加固定成功、`kill -0 1`
   或检查进程文件等无实际健康语义的探针；端到端日志到达由链路冒烟验证。

@@ -97,8 +97,8 @@ make build
 
 真实 Kafka 4.3.1→Elasticsearch 9.4.4/DLQ 小载荷联动验收已经通过：有效记录写入
 Elasticsearch，永久无效记录写入 `logs.dlq` 并确认源位点，后续有效记录仍会继续
-处理。处理器健康接口、协同退出和独立容器镜像也已通过；Kubernetes 部署、重复
-投递幂等和 Pod 重启恢复仍待完成。
+处理。处理器健康接口、独立容器镜像和 Kubernetes 持续 Deployment 也已通过；
+重复投递幂等、Pod 重启恢复和完整优雅终止证据仍待完成。
 
 ## 容器镜像
 
@@ -137,34 +137,47 @@ make processor-image IMAGE_TAG="$IMAGE_TAG"
 
 `deploy/kubernetes/base/namespace` 统一保存 `stage3-logs` 命名空间和 Restricted
 策略；`base/log-producer` 保存两个持续 Deployment，
+`base/log-processor` 保存 Kafka→Elasticsearch 持续处理 Deployment 和非敏感配置，
 `base/log-producer-acceptance` 保存两个固定批次 Job，`base/kafka` 保存 Kafka
 Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主题初始化 Job；
 `base/filebeat` 与 `base/filebeat-metadata-access` 分别保存采集器和目标命名空间
 Pod-only RBAC；`base/elasticsearch` 保存单节点 StatefulSet、Service、PVC 契约
-和索引模板，`components/elasticsearch-image` 单独固定镜像摘要。
+和索引模板。应用及第三方组件的镜像身份由各自 component 固定。
 持续应用、验收 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
 `overlays/local-acceptance`、`overlays/local-kafka`、`overlays/local-kafka-topics`、
 `overlays/local-filebeat`、`overlays/local-elasticsearch`，共享基础定义但独立
 运行，避免应用、采集、主题或搜索存储操作隐式改动其他组件、Namespace 或 PVC。
 
-本地 overlay 固定使用已经验证的应用代码提交 `d20fc7f`。首次部署前，先确认
-本地 Docker 中存在该标签并将其旁加载到 Minikube：
+本地 overlay 的 producer 固定为 `d20fc7f`，processor 固定为 `9a776ee`。首次
+部署前，先确认两个镜像存在并旁加载到 Minikube：
 
 ```bash
 docker image inspect distributed-log-platform/log-producer:d20fc7f
+docker image inspect distributed-log-platform/log-processor:9a776ee
+
 minikube image load \
   -p stage3-logs \
   distributed-log-platform/log-producer:d20fc7f
+minikube image load \
+  -p stage3-logs \
+  distributed-log-platform/log-processor:9a776ee
 
 make k8s-render
 make k8s-validate
+make k8s-processor-image-check
 make k8s-deploy
 make k8s-status
 ```
 
-如果本地不存在该镜像，应从 Git 提交 `d20fc7f` 构建，不能把其他工作区内容
-冒充为这个标签。`k8s-render` 只输出最终 YAML；`k8s-validate` 使用 API Server
-做服务端 dry-run；`k8s-deploy` 在确认当前上下文为 `stage3-logs` 后才应用。
+镜像必须从对应干净 Git 提交构建，不能用其他工作区内容冒充固定标签。
+`k8s-render` 只输出最终 YAML；`k8s-validate` 使用 API Server 做服务端 dry-run。
+`k8s-deploy` 会先核对 processor 标签在节点内实际对应的 manifest/config 摘要，
+应用后等待 Deployment Ready，再核对 Pod 运行时 config 摘要。
+
+processor 使用单副本 `Recreate`、30 秒终止宽限、startup/readiness/liveness HTTP
+探针、100m/128Mi 请求和 500m/256Mi 上限，并以 UID/GID 10001、只读根文件系统
+运行。当前本地 Kafka 和 Elasticsearch 无认证，连接参数没有敏感值，因此只生成
+ConfigMap，不创建空壳 Secret。
 
 ### Kafka 单节点基线
 
