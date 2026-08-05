@@ -264,13 +264,22 @@ func TestConsumerPollAndCloseErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("empty poll", func(t *testing.T) {
-		consumer := newConsumer(&fakeConsumerClient{})
+	t.Run("empty poll continues waiting", func(t *testing.T) {
+		client := &fakeConsumerClient{records: []*kgo.Record{
+			nil,
+			{Topic: "logs.api-service", Partition: 1, Offset: 31},
+		}}
+		consumer := newConsumer(client)
 		t.Cleanup(consumer.Close)
-		if _, err := consumer.Poll(context.Background()); !errors.Is(err, ErrNoRecord) {
-			t.Fatalf("空拉取错误 = %v，期望 %v", err, ErrNoRecord)
+
+		record, err := consumer.Poll(context.Background())
+		if err != nil {
+			t.Fatalf("空拉取后继续等待: %v", err)
 		}
-		if got := consumer.client.(*fakeConsumerClient).allowCalls; got != 1 {
+		if record.Offset != 31 || len(client.pollLimits) != 2 {
+			t.Fatalf("记录 offset=%d，拉取次数=%d，期望 31/2", record.Offset, len(client.pollLimits))
+		}
+		if got := client.allowCalls; got != 1 {
 			t.Fatalf("空拉取后放行重平衡次数 = %d，期望 1", got)
 		}
 	})
