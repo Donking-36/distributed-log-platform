@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/instance: grafana
+    app.kubernetes.io/component: log-visualization
+    app.kubernetes.io/part-of: distributed-log-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/instance: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP

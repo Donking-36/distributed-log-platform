@@ -358,7 +358,9 @@ UID，而是标记 `fields.routing_reason=kubernetes_metadata_missing`，使用
   应用；不创建模板 Job 或 ConfigMap，部署 StatefulSet 本身不会隐式修改模板。
 
 Grafana 的明细、级别分布以及 ERROR/WARN 时间趋势使用同一个
-Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
+Elasticsearch 数据源。数据源和仪表盘都由 ConfigMap 文件预置；本地单副本
+Grafana 使用临时 SQLite，重建后以仓库文件为权威来源恢复。`v0.1.0` 不增加 Go
+查询服务。
 
 ## 6. 事件与投递契约
 
@@ -400,7 +402,7 @@ Elasticsearch 数据源。`v0.1.0` 不增加 Go 查询服务。
 | Kafka 镜像 | 已验证：`apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 官方 JVM 镜像；linux/amd64 清单摘要 `sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26`；宿主与 Kubernetes 单节点 KRaft、Broker/初始化 Job 运行时 imageID、主题初始化幂等性、同一 PVC 上的主题元数据恢复及 Filebeat 集群内生产/消费通过；受控 1→0→1 短停后 StatefulSet、PVC 和 Cluster ID 保持，故障前位点连续可读并继续推进，故障窗口内 40 条日志恢复完成；不代表多节点高可用或无限中断 |
 | Filebeat 镜像 | 已验证：`docker.elastic.co/beats/filebeat-wolfi:9.4.4@sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca` | 上游 linux/amd64 manifest `sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379`；节点转换后 manifest/config 为 `sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9` / `sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf`；Kafka 客户端协议固定为 Filebeat 支持的 `4.1.0` 并连接 Kafka 4.3.1；配置、运行时 imageID、正常/兜底路由、registry Pod 重建和有界 Kafka 短停恢复门禁均通过 |
 | Elasticsearch 镜像 | 已验证：Elastic Team 维护的 Docker Official Image `docker.io/library/elasticsearch:9.4.4@sha256:7de2137b43d9f263cffe51f139a9f3144da7b9941de615fb4317fc539f4d16a7` | linux/amd64 清单摘要 `sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c`；节点旁加载后的 manifest/config 为 `sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677` / `sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640`；版本/健康、Restricted 运行时、模板映射和 Bulk `create` 201/重复 409 冒烟通过；仅为关闭安全的本地单节点基线 |
-| Grafana 镜像 | 待定 | Elasticsearch 数据源和接口兼容性及预配置查询通过后固定 |
+| Grafana 镜像 | 已验证：`grafana/grafana:13.1.0@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63` | 上游 linux/amd64 清单 `sha256:6ea068891652aa6a65ca9065c26b89de939653803c836426970305c11fd00534`；节点旁加载后的 manifest/config 为 `sha256:aafe62002b2ed4586c824338875f70ccffceadc47f3a699c1918771e656e1f2a` / `sha256:e76fd1761e3cc1dd6071a53484b72762f8b358bb1ecd89c9e21d57090956998e`；Restricted 运行时、Elasticsearch 9.4.4 数据源健康、文件预置仪表盘以及明细/级别分布/ERROR-WARN 趋势查询均通过；仅为匿名只读、本地单实例基线 |
 | Go Kafka 客户端 | 已验证：`github.com/twmb/franz-go v1.21.5` | 模块要求 Go 1.25，当前 Go 1.26.5 满足；关闭自动提交，Kafka 4.3.1 上的单条消费、显式提交、未确认重读及同组重启续读通过；不代表完整 4.3 协议、并发或重平衡验证 |
 | Go Elasticsearch 客户端 | 已验证：`github.com/elastic/go-elasticsearch/v9 v9.4.2` | 使用 `elastic-transport-go/v8 v8.9.0` 配置官方 transport；显式关闭内置重试，由后续处理器统一执行 ADR-002 的有界退避；14 字段转换、逐项错误分支和 Elasticsearch 9.4.4 首次 201/重复 409/唯一计数 1 冒烟通过 |
 

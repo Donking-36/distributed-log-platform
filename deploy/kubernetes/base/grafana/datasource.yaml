@@ -1,0 +1,21 @@
+apiVersion: 1
+
+deleteDatasources:
+  - name: logs-stage3
+    orgId: 1
+
+datasources:
+  - name: logs-stage3
+    uid: logs-stage3
+    orgId: 1
+    type: elasticsearch
+    access: proxy
+    url: http://elasticsearch:9200
+    isDefault: true
+    editable: false
+    jsonData:
+      index: logs-stage3-*
+      timeField: "@timestamp"
+      logMessageField: message
+      logLevelField: log.level
+      maxConcurrentShardRequests: 5

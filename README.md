@@ -40,10 +40,11 @@ UC-004、生产级多节点高可用、多租户、自研网页界面和重复�
 - Go 工具链和项目基线：1.26.5
 
 Kafka 已选定 Apache 官方 JVM 镜像 4.3.1；Filebeat 已选定官方 Wolfi 镜像
-9.4.4；Elasticsearch 已选定 Elastic Team 维护的 Docker Official Image 9.4.4。
-三者均已通过固定摘要和 Minikube 运行时验证，Kafka/Filebeat 还完成了真实消息
-链路验证，Elasticsearch 完成了模板与 Bulk 幂等冒烟。Grafana 镜像仍须通过兼容性
-冒烟后选定。任何部署清单都不得使用 `latest`。
+9.4.4；Elasticsearch 已选定 Elastic Team 维护的 Docker Official Image 9.4.4；
+Grafana 已选定官方 OSS 镜像 13.1.0。四者均已通过固定摘要和 Minikube 运行时
+验证，Kafka/Filebeat 还完成了真实消息链路验证，Elasticsearch 完成了模板与
+Bulk 幂等冒烟，Grafana 完成了数据源、仪表盘和三类面板查询冒烟。任何部署清单
+都不得使用 `latest`。
 
 ## 当前可运行组件
 
@@ -142,11 +143,13 @@ make processor-image IMAGE_TAG="$IMAGE_TAG"
 Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主题初始化 Job；
 `base/filebeat` 与 `base/filebeat-metadata-access` 分别保存采集器和目标命名空间
 Pod-only RBAC；`base/elasticsearch` 保存单节点 StatefulSet、Service、PVC 契约
-和索引模板。应用及第三方组件的镜像身份由各自 component 固定。
+和索引模板；`base/grafana` 保存日志数据源、仪表盘、Deployment 和 ClusterIP
+Service。应用及第三方组件的镜像身份由固定摘要或本地旁加载门禁约束。
 持续应用、验收 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
 `overlays/local-acceptance`、`overlays/local-kafka`、`overlays/local-kafka-topics`、
-`overlays/local-filebeat`、`overlays/local-elasticsearch`，共享基础定义但独立
-运行，避免应用、采集、主题或搜索存储操作隐式改动其他组件、Namespace 或 PVC。
+`overlays/local-filebeat`、`overlays/local-elasticsearch`、
+`overlays/local-grafana`，共享基础定义但独立运行，避免应用、采集、主题或搜索
+存储操作隐式改动其他组件、Namespace 或 PVC。
 
 本地 overlay 的 producer 固定为 `d20fc7f`，processor 固定为 `9a776ee`。首次
 部署前，先确认两个镜像存在并旁加载到 Minikube：
@@ -193,6 +196,39 @@ make k8s-processor-acceptance \
 恢复 Deployment 副本数，最后复核 UID、owner、overlay 和唯一 Pod；不创建临时
 Kubernetes 资源。两条带唯一 `test_run_id` 的 ES 文档作为证据保留，Kafka fixture
 由主题 24 小时保留策略清理。
+
+### Grafana 日志检索
+
+Grafana 13.1.0 直接查询 Elasticsearch，不经过重复的 Go 查询接口。数据源固定
+使用 `logs-stage3-*` 和 `@timestamp`；预置仪表盘包含日志明细、日志级别分布、
+ERROR/WARN 趋势、服务变量、关键词变量和时间范围。日志行可展开查看完整字段。
+
+本地节点无法稳定直接访问 Docker Hub 时，先由宿主拉取并旁加载固定标签；部署
+入口会在写入前核对节点 manifest/config，完成后再核对 Pod imageID：
+
+```bash
+docker pull docker.io/grafana/grafana:13.1.0
+minikube image load \
+  -p stage3-logs \
+  docker.io/grafana/grafana:13.1.0
+
+make k8s-grafana-render
+make k8s-grafana-validate
+make k8s-grafana-image-check
+make k8s-grafana-deploy
+make k8s-grafana-status
+```
+
+Service 仅为集群内 `ClusterIP`。需要在本机浏览时临时转发端口：
+
+```bash
+kubectl --context=stage3-logs port-forward \
+  -n stage3-logs service/grafana 3000:3000
+```
+
+然后访问 `http://127.0.0.1:3000`。当前本地演示关闭 Basic 登录并启用匿名只读；
+它不代表生产认证方案。Grafana 使用临时 SQLite，不保存人工界面修改，数据源和
+仪表盘必须由仓库文件恢复。
 
 ### Kafka 单节点基线
 
