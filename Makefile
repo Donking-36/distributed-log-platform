@@ -11,6 +11,7 @@ EXPECTED_GO_VERSION := go$(GO_VERSION)
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*')
 SHELL_FILES := $(shell find scripts -type f -name '*.sh')
 IMAGE_REPOSITORY ?= distributed-log-platform/log-producer
+PROCESSOR_IMAGE_REPOSITORY ?= distributed-log-platform/log-processor
 IMAGE_TAG ?= dev
 KUBE_CONTEXT ?= stage3-logs
 KUBE_NAMESPACE ?= stage3-logs
@@ -73,7 +74,8 @@ export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
 export KUSTOMIZE_ELASTICSEARCH_OVERLAY ELASTICSEARCH_ROLLOUT_TIMEOUT ELASTICSEARCH_NODE_IMAGE
 export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGEST
 
-.PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build image k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
+.PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build validate-image-tag image processor-image \
+	k8s-context-check k8s-render k8s-validate k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
 	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status k8s-kafka-topics-render \
 	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test \
@@ -140,8 +142,8 @@ kafka-topic-initializer-test:
 kafka-consumer-integration: version-check k8s-context-check
 	@scripts/run-kafka-consumer-integration.sh
 
-# image 只允许开发标签或干净工作区的当前提交短 SHA，避免产生来源不明的镜像。
-image:
+# 两个自研镜像共用同一标签门禁，避免生成 latest 或来源不明的任意标签。
+validate-image-tag:
 	@if [ -z "$(strip $(IMAGE_TAG))" ]; then \
 		echo "镜像标签不能为空"; \
 		exit 1; \
@@ -157,10 +159,20 @@ image:
 			exit 1; \
 		fi; \
 	fi
+
+image: validate-image-tag
 	$(DOCKER) build \
 		--build-arg GO_VERSION=$(GO_VERSION) \
 		--target log-producer \
 		--tag $(IMAGE_REPOSITORY):$(IMAGE_TAG) \
+		.
+
+# processor-image 构建独立处理器镜像，不改变既有 log-producer 镜像入口。
+processor-image: validate-image-tag
+	$(DOCKER) build \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--target log-processor \
+		--tag $(PROCESSOR_IMAGE_REPOSITORY):$(IMAGE_TAG) \
 		.
 
 # k8s-context-check 在任何集群写操作前确认当前上下文，防止误操作其他集群。

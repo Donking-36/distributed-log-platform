@@ -196,8 +196,13 @@ Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOff
   区分正常信号取消与意外取消，并保证运行失败后仍执行独立的有界关闭。
 
 命令入口不重复实现解析、重试、DLQ 或位点规则；处理器容器和 Kubernetes 部署
-仍是后续纵向切片。当前健康语义已在进程内验证，实际 Pod 探针路径、阈值和终止
-期间 Ready 状态变化要在部署切片中继续验证。
+保持在命令组合根之外。根 Dockerfile 为 `log-producer` 和 `log-processor` 使用
+独立构建阶段，只把各自的静态二进制复制到共用的固定摘要 Alpine 运行基线；最终
+镜像继承 UID/GID 10001、SIGTERM 和最小文件系统契约。`make processor-image`
+复用 producer 的标签门禁，但使用独立仓库名和 `log-processor` target。
+
+当前健康语义和处理器容器已验证；实际 Pod 探针路径、阈值、终止期间 Ready 状态
+变化及 Kubernetes 部署要在下一切片继续验证。
 
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。

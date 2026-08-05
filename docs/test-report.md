@@ -973,6 +973,41 @@ git diff --check
 验证。实际 Pod 的 startup/readiness/liveness 参数、SIGTERM 期间摘除流量和
 Restricted 非根容器监听将在部署切片中验证。
 
+### log-processor 容器镜像
+
+2026-08-05 在根 Dockerfile 中增加独立 `log-processor` 构建和最终镜像 target，
+同时保留既有 `log-producer` target 与 `make image` 契约。两个程序只共享 Go 依赖
+下载阶段和非 root Alpine 运行基线，各自只复制构建所需源码及最终静态二进制。
+Makefile 新增 `make processor-image`，与 producer 共用标签门禁。
+
+两个镜像均完成真实构建：
+
+```text
+make processor-image IMAGE_TAG=dev
+# distributed-log-platform/log-processor:dev 构建成功
+
+make image IMAGE_TAG=dev
+# distributed-log-platform/log-producer:dev 回归构建成功
+```
+
+处理器镜像元数据和容器内身份如下：
+
+```text
+user="app:app"
+entrypoint=["/usr/local/bin/log-processor"]
+exposed={"8080/tcp":{}}
+stopsignal="SIGTERM"
+uid=10001 gid=10001
+ldd: /usr/local/bin/log-processor: Not a valid dynamic program
+```
+
+无环境变量启动时进程以状态 1 退出，并明确报告
+`PROCESSOR_KAFKA_BROKERS 不能为空`。`IMAGE_TAG=invalid` 在 Docker 构建前以状态 2
+被标签门禁拒绝；默认 `dev` 构建成功。最终 `make check` 通过。
+
+本节只证明镜像构建、运行身份、静态链接、入口和启动配置反例，不代表处理器已经
+部署到 Kubernetes，也不证明 Pod 探针、网络连通、优雅终止或重启恢复。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -985,4 +1020,4 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
 Kafka、Elasticsearch 和 DLQ。尚未覆盖重复投递、多记录/多分区连续前缀位点推进、
 真实重平衡、提交失败或响应丢失后的真实恢复、处理器健康接口的 Kubernetes 探针、
-容器与部署、处理器重启、端到端恢复以及 Grafana 查询链路。
+部署、处理器重启、端到端恢复以及 Grafana 查询链路。
