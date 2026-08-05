@@ -230,6 +230,19 @@ kubectl --context=stage3-logs port-forward \
 它不代表生产认证方案。Grafana 使用临时 SQLite，不保存人工界面修改，数据源和
 仪表盘必须由仓库文件恢复。
 
+部署稳定后可运行固定数据集验收：
+
+```bash
+make k8s-grafana-acceptance \
+  GRAFANA_ACCEPTANCE_RUN_ID=uc002-local-001
+```
+
+该入口使用共享工作流锁，在临时 `logs-stage3-*` 索引写入 16 条完整文档，验证
+两个服务、四个级别、两个时间窗口、固定错误关键词、无结果、明细与聚合数量
+一致，并重复测量一次三查询请求的 p50/p95。随后把 Grafana 缩到 0 删除 Pod 和
+临时 SQLite，再恢复单副本，验证新 Pod UID、镜像身份、数据源和仪表盘自动恢复。
+退出时删除临时索引并复核 404，Deployment 声明与 overlay 必须无漂移。
+
 ### Kafka 单节点基线
 
 Kafka base 固定官方多架构索引摘要；本地 Minikube 使用按官方 amd64 摘要拉取、

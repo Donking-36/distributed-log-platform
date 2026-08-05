@@ -362,6 +362,11 @@ Elasticsearch 数据源。数据源和仪表盘都由 ConfigMap 文件预置；�
 Grafana 使用临时 SQLite，重建后以仓库文件为权威来源恢复。`v0.1.0` 不增加 Go
 查询服务。
 
+UC-002 查询验收使用唯一临时 `logs-stage3-*` 索引和完整日志契约，不修改生产链路
+索引。固定数据集包含两个服务、DEBUG/INFO/WARN/ERROR、两个时间窗口和固定错误
+关键词；验收通过 Grafana 数据源 API 断言明细、聚合、无结果和响应时间，结束后
+删除临时索引。
+
 ## 6. 事件与投递契约
 
 必需的事件字段和验收数据集定义在 `docs/requirements.md` 中。

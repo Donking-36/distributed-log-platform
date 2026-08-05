@@ -27,6 +27,8 @@ ELASTICSEARCH_INDEX_TEMPLATE ?= deploy/kubernetes/base/elasticsearch/index-templ
 KUSTOMIZE_GRAFANA_OVERLAY ?= deploy/kubernetes/overlays/local-grafana
 GRAFANA_ROLLOUT_TIMEOUT ?= 180s
 GRAFANA_DASHBOARD ?= deploy/kubernetes/base/grafana/dashboards/logs-overview.json
+GRAFANA_ACCEPTANCE_RUN_ID ?=
+GRAFANA_ACCEPTANCE_SAMPLES ?= 10
 ACCEPTANCE_RUN_ID ?=
 ACCEPTANCE_TIMEOUT ?= 60s
 KAFKA_ROLLOUT_TIMEOUT ?= 300s
@@ -93,8 +95,9 @@ export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGE
 export KUSTOMIZE_GRAFANA_OVERLAY GRAFANA_ROLLOUT_TIMEOUT GRAFANA_NODE_IMAGE
 export EXPECTED_GRAFANA_UPSTREAM_INDEX_DIGEST EXPECTED_GRAFANA_UPSTREAM_AMD64_DIGEST
 export EXPECTED_GRAFANA_MANIFEST_DIGEST EXPECTED_GRAFANA_CONFIG_DIGEST
+export GRAFANA_ACCEPTANCE_RUN_ID GRAFANA_ACCEPTANCE_SAMPLES
 
-.PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build validate-image-tag image processor-image \
+.PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test grafana-query-validator-test vet test build validate-image-tag image processor-image \
 	k8s-context-check k8s-render k8s-validate k8s-processor-image-check \
 	k8s-processor-runtime-check k8s-processor-acceptance k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
@@ -104,13 +107,13 @@ export EXPECTED_GRAFANA_MANIFEST_DIGEST EXPECTED_GRAFANA_CONFIG_DIGEST
 	k8s-elasticsearch-render k8s-elasticsearch-validate k8s-elasticsearch-image-check \
 	k8s-elasticsearch-runtime-check k8s-elasticsearch-deploy k8s-elasticsearch-status k8s-elasticsearch-template \
 	k8s-grafana-render k8s-grafana-validate k8s-grafana-image-check k8s-grafana-runtime-check \
-	k8s-grafana-deploy k8s-grafana-status \
+	k8s-grafana-deploy k8s-grafana-status k8s-grafana-acceptance \
 	filebeat-config-check k8s-filebeat-render k8s-filebeat-validate k8s-filebeat-image-check \
 	k8s-filebeat-runtime-check k8s-filebeat-deploy k8s-filebeat-status k8s-filebeat-acceptance \
 	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery k8s-filebeat-kafka-outage-recovery
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
-check: version-check fmt-check shell-check filebeat-validator-test vet test build kafka-topic-initializer-test
+check: version-check fmt-check shell-check filebeat-validator-test grafana-query-validator-test vet test build kafka-topic-initializer-test
 
 # version-check 保证本地命令使用仓库约定的 Go 工具链。
 version-check:
@@ -145,6 +148,9 @@ shell-check:
 # Filebeat Kafka 校验器使用纯标准库 fixture 覆盖成功、未收齐与契约错误分支。
 filebeat-validator-test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest scripts.test_validate_filebeat_kafka_output
+
+grafana-query-validator-test:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest scripts.test_verify_grafana_queries
 
 vet:
 	$(GO) vet ./...
@@ -497,6 +503,10 @@ k8s-grafana-status:
 		-n $(KUBE_NAMESPACE) \
 		-l app.kubernetes.io/name=grafana \
 		-o wide
+
+# k8s-grafana-acceptance 验证固定数据集过滤、聚合、查询延迟和临时 SQLite 重建恢复。
+k8s-grafana-acceptance: k8s-grafana-image-check k8s-grafana-runtime-check
+	@$(PYTHON) scripts/verify_grafana_queries.py
 
 # filebeat-config-check 使用固定官方镜像验证配置，并包含一个非法协议版本反例。
 filebeat-config-check:

@@ -1125,6 +1125,46 @@ WARN 趋势: status=200, frames=1
 验收数据；服务、时间、关键词、无结果、数量一致性、重复性能测量和 Grafana
 重建恢复将在 UC-002 后续验收中使用隔离批次完成。
 
+### Grafana 固定数据集与重建恢复
+
+`scripts/verify_grafana_queries.py` 使用与 Filebeat/processor 恢复入口相同的互斥锁，
+在任何写入前核对 Kubernetes 上下文、Grafana 节点与 Pod 镜像身份、Deployment
+UID/owner/副本数和 `local-grafana` overlay 漂移。纯解析单测覆盖 16 条固定文档、
+明细 total、级别桶、趋势数值列、非法 frame 和 nearest-rank 百分位。
+
+固定数据集写入唯一临时 `logs-stage3-*` 索引，包含两个服务、四种级别和两个时间
+窗口；四条 ERROR 消息带 `uc002-fixed-error`。第一次运行在写入前检测到 ConfigMap
+内容哈希尚未部署并停止，证明漂移门禁有效。按当前清单部署后，三个真实批次通过：
+
+```text
+run_id=uc002-20260805t0440z-verify
+documents=16; all=16; api=8; worker=8; recent=8; keyword=4; none=0
+levels=DEBUG:4,ERROR:4,INFO:4,WARN:4; trends=ERROR:4,WARN:4
+latency_samples=10; p50=0.212s; p95=0.284s
+old_pod_uid=d3cc96aa-b0f1-477e-8785-c02318f86fce
+new_pod_uid=86cc05f2-afd9-4d81-b558-20ba94605189
+
+run_id=uc002-20260805t0455z-repeat
+documents=16; all=16; api=8; worker=8; recent=8; keyword=4; none=0
+levels=DEBUG:4,ERROR:4,INFO:4,WARN:4; trends=ERROR:4,WARN:4
+latency_samples=10; p50=0.186s; p95=0.339s
+old_pod_uid=86cc05f2-afd9-4d81-b558-20ba94605189
+new_pod_uid=d239512a-2902-49ca-96d5-28281375b2dd
+
+run_id=uc002-20260805t0510z-compact
+documents=16; all=16; api=8; worker=8; recent=8; keyword=4; none=0
+levels=DEBUG:4,ERROR:4,INFO:4,WARN:4; trends=ERROR:4,WARN:4
+latency_samples=10; p50=0.180s; p95=0.273s
+old_pod_uid=d239512a-2902-49ca-96d5-28281375b2dd
+new_pod_uid=5dc7178e-8308-4c74-ad76-cc903eef13c9
+```
+
+每个批次都在首次查询后把 Grafana 缩到 0，确认旧 Pod 删除及临时 SQLite 丢失，
+恢复单副本后再次验证数据源、三个面板、变量、查询计数和运行时 imageID。两个
+早期临时索引已确认删除；精简后的第三批还自动复核索引为 404。Deployment
+UID/副本数/owner 和 overlay 精确恢复。
+旧 ConfigMap 哈希在确认未被 Deployment 引用后删除，最终只保留三个当前配置。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -1137,5 +1177,6 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
 Kafka、Elasticsearch 和 DLQ；持续 Deployment 还通过了重复投递和 Pod 重建续读。
 尚未覆盖多记录/多分区连续前缀、真实重平衡、提交失败或响应丢失后的真实恢复、
-大载荷与生产容量。Grafana 查询链路的声明式部署和三个面板冒烟已经通过；固定
-数据集的过滤、数量一致性、性能和重建恢复尚未完成。
+大载荷与生产容量。Grafana 查询链路的声明式部署、固定数据集过滤、数量一致性、
+两次性能采样和 Pod 重建恢复均已通过；该本地结果不代表生产查询容量或多实例
+Grafana 高可用。
