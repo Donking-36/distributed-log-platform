@@ -27,15 +27,19 @@ func TestLoadConfigParsesRequiredValuesAndDefaults(t *testing.T) {
 		t.Fatalf("timeouts = %v/%v/%v", config.WriteTimeout, config.CommitTimeout,
 			config.DeadLetterPublishTimeout)
 	}
+	if config.HealthAddress != defaultHealthAddress {
+		t.Fatalf("health address = %q", config.HealthAddress)
+	}
 }
 
-func TestLoadConfigParsesExplicitTimeouts(t *testing.T) {
+func TestLoadConfigParsesExplicitOptionalValues(t *testing.T) {
 	t.Parallel()
 
 	values := validProcessorEnvironment()
 	values[processorWriteTimeoutEnv] = "3s"
 	values[processorCommitTimeoutEnv] = "4s"
 	values[processorDeadLetterPublishTimeoutEnv] = "5s"
+	values[processorHealthAddressEnv] = "127.0.0.1:18080"
 	config, err := loadConfig(processorLookupEnv(values))
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
@@ -44,6 +48,9 @@ func TestLoadConfigParsesExplicitTimeouts(t *testing.T) {
 		config.DeadLetterPublishTimeout != 5*time.Second {
 		t.Fatalf("timeouts = %v/%v/%v", config.WriteTimeout, config.CommitTimeout,
 			config.DeadLetterPublishTimeout)
+	}
+	if config.HealthAddress != "127.0.0.1:18080" {
+		t.Fatalf("health address = %q", config.HealthAddress)
 	}
 }
 
@@ -70,7 +77,7 @@ func TestLoadConfigRejectsMissingRequiredValues(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsUnsafeListsAndTimeouts(t *testing.T) {
+func TestLoadConfigRejectsUnsafeListsAndOptionalValues(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -85,6 +92,9 @@ func TestLoadConfigRejectsUnsafeListsAndTimeouts(t *testing.T) {
 		{name: "订阅 DLQ", env: processorKafkaTopicsEnv, value: "logs.api-service,logs.dlq", needle: "logs.dlq"},
 		{name: "非法超时", env: processorWriteTimeoutEnv, value: "soon", needle: processorWriteTimeoutEnv},
 		{name: "非正超时", env: processorCommitTimeoutEnv, value: "0s", needle: "大于 0"},
+		{name: "健康地址缺少端口", env: processorHealthAddressEnv, value: "localhost", needle: "host:port"},
+		{name: "健康地址端口非数字", env: processorHealthAddressEnv, value: ":http", needle: "1 到 65535"},
+		{name: "健康地址端口越界", env: processorHealthAddressEnv, value: ":65536", needle: "1 到 65535"},
 	}
 	for _, test := range tests {
 		test := test

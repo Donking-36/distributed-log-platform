@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,10 +20,12 @@ const (
 	processorWriteTimeoutEnv             = "PROCESSOR_WRITE_TIMEOUT"
 	processorCommitTimeoutEnv            = "PROCESSOR_COMMIT_TIMEOUT"
 	processorDeadLetterPublishTimeoutEnv = "PROCESSOR_DLQ_PUBLISH_TIMEOUT"
+	processorHealthAddressEnv            = "PROCESSOR_HEALTH_ADDRESS"
 
 	defaultWriteTimeout             = 10 * time.Second
 	defaultCommitTimeout            = 10 * time.Second
 	defaultDeadLetterPublishTimeout = 10 * time.Second
+	defaultHealthAddress            = ":8080"
 )
 
 // config 保存 log-processor 启动所需的完整命令级配置。
@@ -34,6 +38,7 @@ type config struct {
 	WriteTimeout             time.Duration
 	CommitTimeout            time.Duration
 	DeadLetterPublishTimeout time.Duration
+	HealthAddress            string
 }
 
 // loadConfig 读取、规范化并一次性校验环境配置，避免处理循环接收半有效状态。
@@ -97,6 +102,14 @@ func loadConfig(lookupEnv func(string) (string, bool)) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	healthAddress, err := optionalListenAddress(
+		lookupEnv,
+		processorHealthAddressEnv,
+		defaultHealthAddress,
+	)
+	if err != nil {
+		return config{}, err
+	}
 
 	return config{
 		KafkaBrokers:             brokers,
@@ -107,6 +120,7 @@ func loadConfig(lookupEnv func(string) (string, bool)) (config, error) {
 		WriteTimeout:             writeTimeout,
 		CommitTimeout:            commitTimeout,
 		DeadLetterPublishTimeout: deadLetterPublishTimeout,
+		HealthAddress:            healthAddress,
 	}, nil
 }
 
@@ -165,4 +179,33 @@ func optionalPositiveDuration(
 		return 0, fmt.Errorf("%s 必须大于 0", name)
 	}
 	return duration, nil
+}
+
+// optionalListenAddress 校验显式数值端口，避免把拼写错误拖到依赖组装之后。
+func optionalListenAddress(
+	lookupEnv func(string) (string, bool),
+	name string,
+	defaultValue string,
+) (string, error) {
+	value, exists := lookupEnv(name)
+	if !exists {
+		value = defaultValue
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s 不能为空", name)
+	}
+
+	host, portText, err := net.SplitHostPort(value)
+	if err != nil {
+		return "", fmt.Errorf("%s 必须是 host:port 格式: %w", name, err)
+	}
+	if host != strings.TrimSpace(host) || portText != strings.TrimSpace(portText) {
+		return "", fmt.Errorf("%s 不能包含多余空白", name)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("%s 端口必须在 1 到 65535 之间", name)
+	}
+	return value, nil
 }
