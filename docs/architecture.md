@@ -248,6 +248,11 @@ UC-001/UC-002 验收链路全绿之后。
   Pod 禁用 ServiceAccount token 与 Service 环境变量，以 UID/GID 10001、只读根、
   RuntimeDefault seccomp 和全 capability drop 运行。它没有对外服务面，因此不创建
   Kubernetes Service。
+- `make k8s-processor-acceptance` 在共享互斥锁内验证稳定事件重复投递和 Pod 重建
+  续读。它只修改已核对 UID、owner、原副本数和声明无漂移的 processor Deployment；
+  在 0 副本窗口写入恢复记录，再恢复为 1，并复核新 Pod、运行时镜像、消费者组、
+  ES 文档及最终 overlay 无漂移。固定业务主题中的 fixture 由 24 小时策略清理，
+  两条带唯一批次的 ES 文档保留为验收证据。
 - `log-producer`：配置资源请求/限制、安全上下文和优雅终止。它没有 Service
   或流量入口，进程退出已由 kubelet 感知，因此不添加固定成功、`kill -0 1`
   或检查进程文件等无实际健康语义的探针；端到端日志到达由链路冒烟验证。

@@ -17,6 +17,7 @@ KUBE_CONTEXT ?= stage3-logs
 KUBE_NAMESPACE ?= stage3-logs
 KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
 PROCESSOR_ROLLOUT_TIMEOUT ?= 180s
+PROCESSOR_ACCEPTANCE_RUN_ID ?=
 KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
 KUSTOMIZE_KAFKA_OVERLAY ?= deploy/kubernetes/overlays/local-kafka
 KUSTOMIZE_KAFKA_TOPICS_OVERLAY ?= deploy/kubernetes/overlays/local-kafka-topics
@@ -82,7 +83,7 @@ export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGE
 
 .PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build validate-image-tag image processor-image \
 	k8s-context-check k8s-render k8s-validate k8s-processor-image-check \
-	k8s-processor-runtime-check k8s-deploy k8s-status \
+	k8s-processor-runtime-check k8s-processor-acceptance k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
 	k8s-kafka-runtime-check k8s-kafka-deploy k8s-kafka-status k8s-kafka-topics-render \
 	k8s-kafka-topics-validate k8s-kafka-topics k8s-kafka-topics-status kafka-topic-initializer-test \
@@ -247,6 +248,11 @@ k8s-processor-runtime-check: k8s-context-check
 		exit 1; \
 	fi; \
 	echo "log-processor Pod 运行时镜像身份通过：config=$$actual_config"
+
+# k8s-processor-acceptance 验证部署幂等、SIGTERM 就绪撤销和消费者组续读。
+k8s-processor-acceptance: k8s-processor-image-check k8s-processor-runtime-check
+	@PROCESSOR_ACCEPTANCE_RUN_ID='$(PROCESSOR_ACCEPTANCE_RUN_ID)' \
+		scripts/run-processor-deployment-acceptance.sh
 
 # k8s-deploy 通过准入和节点镜像门禁后部署应用，并等待处理器真实就绪。
 k8s-deploy: k8s-validate k8s-processor-image-check
