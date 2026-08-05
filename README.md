@@ -97,14 +97,15 @@ make build
 
 真实 Kafka 4.3.1→Elasticsearch 9.4.4/DLQ 小载荷联动验收已经通过：有效记录写入
 Elasticsearch，永久无效记录写入 `logs.dlq` 并确认源位点，后续有效记录仍会继续
-处理。处理器健康接口及其协同退出单元边界也已通过；处理器容器镜像、Kubernetes
-部署、重复投递幂等和 Pod 重启恢复仍待完成。
+处理。处理器健康接口、协同退出和独立容器镜像也已通过；Kubernetes 部署、重复
+投递幂等和 Pod 重启恢复仍待完成。
 
 ## 容器镜像
 
-根目录 Dockerfile 使用 Go 1.26.5 多阶段构建，只把静态二进制复制到固定摘要的
-Alpine 3.23 运行镜像。容器以 UID/GID 10001 运行，并显式使用 SIGTERM 作为
-停止信号。
+根目录 Dockerfile 使用 Go 1.26.5 多阶段构建，分别生成 `log-producer` 和
+`log-processor` 静态二进制，再复制到共用的固定摘要 Alpine 3.23 运行基线。
+两个最终镜像只包含各自的程序，均以 UID/GID 10001 运行，并显式使用 SIGTERM
+作为停止信号。
 
 `make image` 只接受默认的开发标签 `dev`，或干净工作区的当前提交短 SHA；
 因此不会生成 `latest` 或来源不明的任意标签。同一提交标签一旦用于部署或验收，
@@ -122,8 +123,15 @@ docker run --rm \
   "distributed-log-platform/log-producer:$IMAGE_TAG"
 ```
 
-`make image` 是显式的镜像构建入口，不属于默认 `make check`。基础持续集成只
-运行无需 Docker 的快速门禁；容器构建和运行验收在相关功能分支中单独执行。
+处理器使用独立入口并复用相同标签门禁：
+
+```bash
+make processor-image IMAGE_TAG="$IMAGE_TAG"
+```
+
+`make image` 和 `make processor-image` 都是显式镜像构建入口，不属于默认
+`make check`。基础持续集成只运行无需 Docker 的快速门禁；容器构建和运行验收
+在相关功能分支中单独执行。
 
 ## Kubernetes 本地部署
 
