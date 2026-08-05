@@ -1047,9 +1047,39 @@ Elasticsearch `logs-stage3-v1/_count` 在同一过程从 33,991 增长到 115,30
 文档包含稳定 `event_id`、业务时间、`ingested_at`、服务名、Pod UID、container ID、
 原始路径、offset 和消息。稳定窗口结束时 processor 没有错误日志。
 
-这些数据来自关机恢复后的真实历史积压与两个持续 producer，不是隔离的精确数量
-验收，因此只证明部署、探针、Kafka 消费和 Elasticsearch 写入连通。重复投递唯一
-文档数、Pod 删除后的续读、SIGTERM 就绪摘除及故障恢复仍需后续独立验证。
+上述数据来自关机恢复后的真实历史积压与两个持续 producer，不是隔离的精确数量
+验收，因此只证明部署、探针、Kafka 消费和 Elasticsearch 写入连通。随后将受控
+幂等与恢复流程固化为：
+
+```text
+make k8s-processor-acceptance \
+  PROCESSOR_ACCEPTANCE_RUN_ID=uc001b-20260805t0340z-verify
+```
+
+最终固化入口证据：
+
+```text
+duplicate_test_run_id=uc001b-20260805t0340z-verify-duplicate
+duplicate _id=sha256:37a3bbfb710758b4dc8cb15f4f01d5a0ab9d8dc620eaf94601224873dfa85885
+duplicate event_id=sha256:37a3bbfb710758b4dc8cb15f4f01d5a0ab9d8dc620eaf94601224873dfa85885
+duplicate hits.total=1
+old_uid=b968884f-3bb3-44b8-87b8-938e442b0fc2
+termination=2026-08-05T03:43:26Z|False
+new_uid=cb286c64-40f6-4910-b8cf-4b6e2d212cd9
+new_ready=true new_restarts=0
+recovery_test_run_id=uc001b-20260805t0340z-verify-recovery
+recovery _id=sha256:8ea2618744863770acc795db9c64240afd1d5e54cdce590be4336a3997289a34
+recovery hits.total=1
+consumer_group_lag=0
+cleanup=Deployment UID/副本数/owner、应用 overlay 和单 Pod 已恢复；无临时资源
+```
+
+入口先确认固定镜像的节点 manifest/config 与 Pod imageID，再核对 Deployment UID、
+无 owner、原副本数 1 和 overlay 无漂移。两条完全相同的 Kafka value 均获确认后，
+ES 仍只有一个文档且 `_id=event_id`。入口把 Deployment 缩到 0，旧 Pod 删除期间
+观测到 Ready=False；恢复事件在无 processor 窗口写入。恢复为 1 后，新 Pod UID
+变化、Ready 且 0 重启，同一消费者组归零并写入唯一恢复文档。最终声明状态精确
+恢复。固定主题中的三条 fixture 由 24 小时策略清理，两条 ES 文档保留为证据。
 
 ### 当前边界
 
@@ -1061,6 +1091,6 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 生产容量；Elasticsearch 服务端、Go Bulk 写入和 Kafka 单条显式提交边界已经覆盖，
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
 Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
-Kafka、Elasticsearch 和 DLQ，持续 Deployment 也已处理真实历史积压。尚未覆盖
-重复投递、多记录/多分区连续前缀位点推进、真实重平衡、提交失败或响应丢失后的
-真实恢复、SIGTERM 摘除、处理器重启、端到端恢复以及 Grafana 查询链路。
+Kafka、Elasticsearch 和 DLQ；持续 Deployment 还通过了重复投递和 Pod 重建续读。
+尚未覆盖多记录/多分区连续前缀、真实重平衡、提交失败或响应丢失后的真实恢复、
+大载荷与生产容量，以及 Grafana 查询链路。

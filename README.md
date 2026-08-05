@@ -98,7 +98,7 @@ make build
 真实 Kafka 4.3.1→Elasticsearch 9.4.4/DLQ 小载荷联动验收已经通过：有效记录写入
 Elasticsearch，永久无效记录写入 `logs.dlq` 并确认源位点，后续有效记录仍会继续
 处理。处理器健康接口、独立容器镜像和 Kubernetes 持续 Deployment 也已通过；
-重复投递幂等、Pod 重启恢复和完整优雅终止证据仍待完成。
+重复投递幂等、SIGTERM 就绪撤销和 Pod 重建续读也已通过固化验收入口。
 
 ## 容器镜像
 
@@ -178,6 +178,21 @@ processor 使用单副本 `Recreate`、30 秒终止宽限、startup/readiness/li
 探针、100m/128Mi 请求和 500m/256Mi 上限，并以 UID/GID 10001、只读根文件系统
 运行。当前本地 Kafka 和 Elasticsearch 无认证，连接参数没有敏感值，因此只生成
 ConfigMap，不创建空壳 Secret。
+
+部署稳定后可执行 UC-001B 的幂等与恢复验收：
+
+```bash
+make k8s-processor-acceptance \
+  PROCESSOR_ACCEPTANCE_RUN_ID=uc001b-local-001
+```
+
+该入口先取得共享验收锁并确认 overlay 无漂移，然后向固定业务主题写入两条完全
+相同的事件，验证 Elasticsearch 中 `_id` 与 `event_id` 相同且唯一。随后将 processor
+缩到 0，确认旧 Pod 在 SIGTERM 期间 Ready=False，在停机窗口写入恢复事件，再恢复
+单副本并验证新 Pod UID、运行时镜像、消费者组 LAG=0 和恢复文档。退出时会接管并
+恢复 Deployment 副本数，最后复核 UID、owner、overlay 和唯一 Pod；不创建临时
+Kubernetes 资源。两条带唯一 `test_run_id` 的 ES 文档作为证据保留，Kafka fixture
+由主题 24 小时保留策略清理。
 
 ### Kafka 单节点基线
 
