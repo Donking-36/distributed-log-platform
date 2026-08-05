@@ -24,6 +24,9 @@ KUSTOMIZE_KAFKA_TOPICS_OVERLAY ?= deploy/kubernetes/overlays/local-kafka-topics
 KUSTOMIZE_FILEBEAT_OVERLAY ?= deploy/kubernetes/overlays/local-filebeat
 KUSTOMIZE_ELASTICSEARCH_OVERLAY ?= deploy/kubernetes/overlays/local-elasticsearch
 ELASTICSEARCH_INDEX_TEMPLATE ?= deploy/kubernetes/base/elasticsearch/index-template.json
+KUSTOMIZE_GRAFANA_OVERLAY ?= deploy/kubernetes/overlays/local-grafana
+GRAFANA_ROLLOUT_TIMEOUT ?= 180s
+GRAFANA_DASHBOARD ?= deploy/kubernetes/base/grafana/dashboards/logs-overview.json
 ACCEPTANCE_RUN_ID ?=
 ACCEPTANCE_TIMEOUT ?= 60s
 KAFKA_ROLLOUT_TIMEOUT ?= 300s
@@ -62,6 +65,13 @@ override ELASTICSEARCH_NODE_IMAGE := docker.io/library/elasticsearch:9.4.4
 override EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST := sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677
 override EXPECTED_ELASTICSEARCH_CONFIG_DIGEST := sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640
 
+# Grafana 本地旁加载会转换 manifest；上游、节点 manifest 与 config 分别记录。
+override GRAFANA_NODE_IMAGE := docker.io/grafana/grafana:13.1.0
+override EXPECTED_GRAFANA_UPSTREAM_INDEX_DIGEST := sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
+override EXPECTED_GRAFANA_UPSTREAM_AMD64_DIGEST := sha256:6ea068891652aa6a65ca9065c26b89de939653803c836426970305c11fd00534
+override EXPECTED_GRAFANA_MANIFEST_DIGEST := sha256:aafe62002b2ed4586c824338875f70ccffceadc47f3a699c1918771e656e1f2a
+override EXPECTED_GRAFANA_CONFIG_DIGEST := sha256:e76fd1761e3cc1dd6071a53484b72762f8b358bb1ecd89c9e21d57090956998e
+
 # 自研镜像旁加载后会转换 manifest；节点摘要与 component 必须在同一提交中更新。
 override PROCESSOR_NODE_IMAGE := docker.io/distributed-log-platform/log-processor:9a776ee
 override EXPECTED_PROCESSOR_MANIFEST_DIGEST := sha256:37373150f7ce524d7b1b7511049158c5581e266134619125918f17de3581fc1a
@@ -80,6 +90,9 @@ export FILEBEAT_NODE_IMAGE EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST EXPECTED_FILE
 export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
 export KUSTOMIZE_ELASTICSEARCH_OVERLAY ELASTICSEARCH_ROLLOUT_TIMEOUT ELASTICSEARCH_NODE_IMAGE
 export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGEST
+export KUSTOMIZE_GRAFANA_OVERLAY GRAFANA_ROLLOUT_TIMEOUT GRAFANA_NODE_IMAGE
+export EXPECTED_GRAFANA_UPSTREAM_INDEX_DIGEST EXPECTED_GRAFANA_UPSTREAM_AMD64_DIGEST
+export EXPECTED_GRAFANA_MANIFEST_DIGEST EXPECTED_GRAFANA_CONFIG_DIGEST
 
 .PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test vet test build validate-image-tag image processor-image \
 	k8s-context-check k8s-render k8s-validate k8s-processor-image-check \
@@ -90,6 +103,8 @@ export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGE
 	kafka-consumer-integration \
 	k8s-elasticsearch-render k8s-elasticsearch-validate k8s-elasticsearch-image-check \
 	k8s-elasticsearch-runtime-check k8s-elasticsearch-deploy k8s-elasticsearch-status k8s-elasticsearch-template \
+	k8s-grafana-render k8s-grafana-validate k8s-grafana-image-check k8s-grafana-runtime-check \
+	k8s-grafana-deploy k8s-grafana-status \
 	filebeat-config-check k8s-filebeat-render k8s-filebeat-validate k8s-filebeat-image-check \
 	k8s-filebeat-runtime-check k8s-filebeat-deploy k8s-filebeat-status k8s-filebeat-acceptance \
 	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery k8s-filebeat-kafka-outage-recovery
@@ -400,6 +415,88 @@ k8s-elasticsearch-template: k8s-elasticsearch-runtime-check
 		exit 1; \
 	fi; \
 	echo "Elasticsearch 索引模板已确认：logs-stage3-v1"
+
+# k8s-grafana-render 只渲染声明式数据源、仪表盘和单实例部署，不连接集群。
+k8s-grafana-render:
+	@$(KUBECTL) kustomize $(KUSTOMIZE_GRAFANA_OVERLAY)
+
+# k8s-grafana-validate 先解析仪表盘 JSON，再使用目标 API Server 校验资源但不持久化。
+k8s-grafana-validate: k8s-context-check
+	@$(PYTHON) -m json.tool $(GRAFANA_DASHBOARD) >/dev/null
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		--dry-run=server \
+		-k $(KUSTOMIZE_GRAFANA_OVERLAY)
+
+# k8s-grafana-image-check 在部署前核对旁加载标签对应的节点 manifest 和 config。
+k8s-grafana-image-check: k8s-context-check
+	@image_table="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
+		sudo ctr -n k8s.io images list 'name==$(GRAFANA_NODE_IMAGE)')"; \
+	actual_manifest="$$(printf '%s\n' "$$image_table" | \
+		awk -v image='$(GRAFANA_NODE_IMAGE)' 'NR > 1 && $$1 == image { print $$3; exit }')"; \
+	if [ "$$actual_manifest" != "$(EXPECTED_GRAFANA_MANIFEST_DIGEST)" ]; then \
+		echo "Grafana 节点镜像 manifest 不匹配：实际 $${actual_manifest:-缺失}，要求 $(EXPECTED_GRAFANA_MANIFEST_DIGEST)"; \
+		exit 1; \
+	fi; \
+	actual_config="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
+		sudo crictl inspecti -o go-template --template '{{.status.id}}' \
+		'$(GRAFANA_NODE_IMAGE)')"; \
+	actual_config="$$(printf '%s' "$$actual_config" | tr -d '\r')"; \
+	if [ "$$actual_config" != "$(EXPECTED_GRAFANA_CONFIG_DIGEST)" ]; then \
+		echo "Grafana 节点镜像 config 不匹配：实际 $${actual_config:-缺失}，要求 $(EXPECTED_GRAFANA_CONFIG_DIGEST)"; \
+		exit 1; \
+	fi; \
+	echo "Grafana 节点镜像身份通过：manifest=$$actual_manifest config=$$actual_config"
+
+# k8s-grafana-runtime-check 同时核对本地声明标签和容器运行时 config 摘要。
+k8s-grafana-runtime-check: k8s-context-check
+	@pod_count="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=grafana \
+		-o name | wc -l | tr -d ' ')"; \
+	if [ "$$pod_count" != "1" ]; then \
+		echo "Grafana Pod 数量为 $$pod_count，要求 1"; \
+		exit 1; \
+	fi; \
+	spec_image="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get deployment/grafana \
+		-n $(KUBE_NAMESPACE) \
+		-o 'jsonpath={.spec.template.spec.containers[?(@.name=="grafana")].image}')"; \
+	if [ "$$spec_image" != "$(GRAFANA_NODE_IMAGE)" ]; then \
+		echo "Grafana 声明镜像不匹配：实际 $${spec_image:-缺失}，要求 $(GRAFANA_NODE_IMAGE)"; \
+		exit 1; \
+	fi; \
+	runtime_image_id="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=grafana \
+		-o 'jsonpath={.items[0].status.containerStatuses[?(@.name=="grafana")].imageID}')"; \
+	runtime_digest="$${runtime_image_id##*@}"; \
+	if [ "$$runtime_digest" != "$(EXPECTED_GRAFANA_CONFIG_DIGEST)" ]; then \
+		echo "Grafana Pod 镜像不匹配：实际 $${runtime_digest:-缺失}，要求 $(EXPECTED_GRAFANA_CONFIG_DIGEST)"; \
+		exit 1; \
+	fi; \
+	echo "Grafana Pod 镜像身份通过：digest=$$runtime_digest"
+
+k8s-grafana-deploy: k8s-grafana-validate k8s-grafana-image-check
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		apply \
+		-k $(KUSTOMIZE_GRAFANA_OVERLAY)
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		rollout status \
+		deployment/grafana \
+		-n $(KUBE_NAMESPACE) \
+		--timeout=$(GRAFANA_ROLLOUT_TIMEOUT)
+	@$(MAKE) --no-print-directory k8s-grafana-runtime-check
+
+k8s-grafana-status:
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		get deployments,pods,services \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=grafana \
+		-o wide
 
 # filebeat-config-check 使用固定官方镜像验证配置，并包含一个非法协议版本反例。
 filebeat-config-check:

@@ -1081,6 +1081,50 @@ ES 仍只有一个文档且 `_id=event_id`。入口把 Deployment 缩到 0，旧
 变化、Ready 且 0 重启，同一消费者组归零并写入唯一恢复文档。最终声明状态精确
 恢复。固定主题中的三条 fixture 由 24 小时策略清理，两条 ES 文档保留为证据。
 
+### Grafana 声明式部署与查询冒烟
+
+2026-08-05 新增 `base/grafana` 和独立 `local-grafana` overlay。数据源、仪表盘
+provider 与仪表盘 JSON 分别生成带内容哈希的 ConfigMap；Deployment 使用单副本
+`Recreate`、startup/readiness/liveness、100m/256Mi 请求、500m/512Mi 上限、
+UID/GID 472、只读根文件系统和 RuntimeDefault seccomp。Service 保持 ClusterIP，
+本地演示启用匿名 Viewer、关闭 Basic 登录和默认插件动态安装。
+
+官方上游镜像与本地旁加载身份如下：
+
+```text
+grafana=13.1.0
+upstream_index=sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
+upstream_amd64=sha256:6ea068891652aa6a65ca9065c26b89de939653803c836426970305c11fd00534
+node_manifest=sha256:aafe62002b2ed4586c824338875f70ccffceadc47f3a699c1918771e656e1f2a
+node_config=sha256:e76fd1761e3cc1dd6071a53484b72762f8b358bb1ecd89c9e21d57090956998e
+Pod imageID=sha256:e76fd1761e3cc1dd6071a53484b72762f8b358bb1ecd89c9e21d57090956998e
+```
+
+Minikube 节点首次直接拉取固定 digest 时，Docker Hub 连接重置并产生
+`ImagePullBackOff`。宿主成功核对上游 digest 后将同一版本旁加载到节点；本地
+overlay 改用固定标签和 `Never`，`make k8s-grafana-deploy` 在应用前后执行摘要
+门禁，最终 rollout 成功。该处理只解决本地网络问题，不把标签或 `Never` 当作
+镜像身份证据。
+
+第一次真实查询暴露数据源误用了 UI 文案 `interval: No pattern`，Grafana 插件
+返回 `unsupported interval 'No pattern'`。省略通配索引不需要的 `interval` 后，
+Grafana API 验证结果为：
+
+```text
+/api/health: database=ok, version=13.1.0
+/api/datasources/uid/logs-stage3/health: status=OK
+/api/dashboards/uid/stage3-logs-overview: provisioned=true, version=1
+日志明细查询: status=200, total=7181（滚动一小时现场数据）
+日志级别分布: status=200, frames=1
+ERROR 趋势: status=200, frames=1
+WARN 趋势: status=200, frames=1
+```
+
+上述结果证明 Grafana 13.1.0 内置 Elasticsearch 插件能够查询 Elasticsearch
+9.4.4，三个预置面板的查询模型可执行。滚动一小时数量来自持续日志，不是固定
+验收数据；服务、时间、关键词、无结果、数量一致性、重复性能测量和 Grafana
+重建恢复将在 UC-002 后续验收中使用隔离批次完成。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -1093,4 +1137,5 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
 Kafka、Elasticsearch 和 DLQ；持续 Deployment 还通过了重复投递和 Pod 重建续读。
 尚未覆盖多记录/多分区连续前缀、真实重平衡、提交失败或响应丢失后的真实恢复、
-大载荷与生产容量，以及 Grafana 查询链路。
+大载荷与生产容量。Grafana 查询链路的声明式部署和三个面板冒烟已经通过；固定
+数据集的过滤、数量一致性、性能和重建恢复尚未完成。

@@ -1,0 +1,14 @@
+apiVersion: 1
+
+providers:
+  - name: stage3-logs
+    orgId: 1
+    folder: 阶段三日志平台
+    folderUid: stage3-logs
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
