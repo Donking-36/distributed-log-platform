@@ -1,0 +1,88 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: stage3-logs
+
+resources:
+  # 性能 Job 复用已验收的日志源镜像、安全上下文和字段契约。
+  - ../../base/log-producer-acceptance
+
+patches:
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      name: api-service-acceptance
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: api-service-throughput
+      - op: replace
+        path: /metadata/labels/app.kubernetes.io~1instance
+        value: api-service-throughput
+      - op: replace
+        path: /metadata/labels/distributed-log-platform.io~1purpose
+        value: throughput
+      - op: replace
+        path: /spec/activeDeadlineSeconds
+        value: 180
+      - op: replace
+        path: /spec/template/metadata/labels/app.kubernetes.io~1instance
+        value: api-service-throughput
+      - op: replace
+        path: /spec/template/metadata/labels/distributed-log-platform.io~1purpose
+        value: throughput
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "60000"
+      - op: replace
+        path: /spec/template/spec/containers/0/env/2/value
+        value: 1ms
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 250m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: 250m
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+      name: worker-service-acceptance
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: worker-service-throughput
+      - op: replace
+        path: /metadata/labels/app.kubernetes.io~1instance
+        value: worker-service-throughput
+      - op: replace
+        path: /metadata/labels/distributed-log-platform.io~1purpose
+        value: throughput
+      - op: replace
+        path: /spec/activeDeadlineSeconds
+        value: 180
+      - op: replace
+        path: /spec/template/metadata/labels/app.kubernetes.io~1instance
+        value: worker-service-throughput
+      - op: replace
+        path: /spec/template/metadata/labels/distributed-log-platform.io~1purpose
+        value: throughput
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "60000"
+      - op: replace
+        path: /spec/template/spec/containers/0/env/2/value
+        value: 1ms
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 250m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: 250m

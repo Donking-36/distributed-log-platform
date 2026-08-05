@@ -18,6 +18,14 @@ def positive_count(value: str) -> int:
     return count
 
 
+def positive_sequence(value: str) -> int:
+    """把起始序号转换为严格正整数。"""
+    sequence = int(value)
+    if sequence <= 0:
+        raise argparse.ArgumentTypeError("first-sequence 必须大于零")
+    return sequence
+
+
 def parse_args() -> argparse.Namespace:
     """读取调用方声明的期望批次契约。"""
     parser = argparse.ArgumentParser()
@@ -25,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--service", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--count", required=True, type=positive_count)
+    parser.add_argument("--first-sequence", type=positive_sequence, default=1)
     return parser.parse_args()
 
 
@@ -32,6 +41,7 @@ def validate_event(
     event: Any,
     *,
     line_number: int,
+    expected_sequence: int,
     expected_service: str,
     expected_run_id: str,
 ) -> list[str]:
@@ -45,9 +55,9 @@ def validate_event(
         errors.append(f"第 {line_number} 行 event.sequence 不是整数")
         return errors
 
-    if sequence != line_number:
+    if sequence != expected_sequence:
         errors.append(
-            f"第 {line_number} 行序号为 {sequence}，期望 {line_number}"
+            f"第 {line_number} 行序号为 {sequence}，期望 {expected_sequence}"
         )
     if event.get("service.name") != expected_service:
         errors.append(
@@ -73,6 +83,7 @@ def validate_output(
     expected_service: str,
     expected_run_id: str,
     expected_count: int,
+    first_sequence: int = 1,
 ) -> list[str]:
     """解析完整输出，并返回所有可操作的契约错误。"""
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -92,6 +103,7 @@ def validate_output(
             validate_event(
                 event,
                 line_number=line_number,
+                expected_sequence=first_sequence + line_number - 1,
                 expected_service=expected_service,
                 expected_run_id=expected_run_id,
             )
@@ -108,6 +120,7 @@ def main() -> int:
         expected_service=args.service,
         expected_run_id=args.run_id,
         expected_count=args.count,
+        first_sequence=args.first_sequence,
     )
     if errors:
         for error in errors[:20]:
@@ -118,7 +131,7 @@ def main() -> int:
 
     print(
         f"{args.service}：{args.count} 条合法 JSON，"
-        f"test_run_id={args.run_id}，序号连续"
+        f"test_run_id={args.run_id}，序号从 {args.first_sequence} 连续"
     )
     return 0
 

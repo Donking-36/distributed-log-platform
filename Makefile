@@ -19,6 +19,9 @@ KUSTOMIZE_OVERLAY ?= deploy/kubernetes/overlays/local
 PROCESSOR_ROLLOUT_TIMEOUT ?= 180s
 PROCESSOR_ACCEPTANCE_RUN_ID ?=
 KUSTOMIZE_ACCEPTANCE_OVERLAY ?= deploy/kubernetes/overlays/local-acceptance
+KUSTOMIZE_THROUGHPUT_OVERLAY ?= deploy/kubernetes/overlays/local-throughput
+THROUGHPUT_RUN_ID ?=
+THROUGHPUT_TIMEOUT_SECONDS ?= 240
 KUSTOMIZE_KAFKA_OVERLAY ?= deploy/kubernetes/overlays/local-kafka
 KUSTOMIZE_KAFKA_TOPICS_OVERLAY ?= deploy/kubernetes/overlays/local-kafka-topics
 KUSTOMIZE_FILEBEAT_OVERLAY ?= deploy/kubernetes/overlays/local-filebeat
@@ -96,8 +99,9 @@ export KUSTOMIZE_GRAFANA_OVERLAY GRAFANA_ROLLOUT_TIMEOUT GRAFANA_NODE_IMAGE
 export EXPECTED_GRAFANA_UPSTREAM_INDEX_DIGEST EXPECTED_GRAFANA_UPSTREAM_AMD64_DIGEST
 export EXPECTED_GRAFANA_MANIFEST_DIGEST EXPECTED_GRAFANA_CONFIG_DIGEST
 export GRAFANA_ACCEPTANCE_RUN_ID GRAFANA_ACCEPTANCE_SAMPLES
+export KUSTOMIZE_THROUGHPUT_OVERLAY THROUGHPUT_RUN_ID THROUGHPUT_TIMEOUT_SECONDS
 
-.PHONY: check version-check fmt fmt-check shell-check filebeat-validator-test grafana-query-validator-test vet test build validate-image-tag image processor-image \
+.PHONY: check version-check fmt fmt-check shell-check log-producer-validator-test filebeat-validator-test grafana-query-validator-test vet test build validate-image-tag image processor-image \
 	k8s-context-check k8s-render k8s-validate k8s-processor-image-check \
 	k8s-processor-runtime-check k8s-processor-acceptance k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
@@ -110,10 +114,10 @@ export GRAFANA_ACCEPTANCE_RUN_ID GRAFANA_ACCEPTANCE_SAMPLES
 	k8s-grafana-deploy k8s-grafana-status k8s-grafana-acceptance \
 	filebeat-config-check k8s-filebeat-render k8s-filebeat-validate k8s-filebeat-image-check \
 	k8s-filebeat-runtime-check k8s-filebeat-deploy k8s-filebeat-status k8s-filebeat-acceptance \
-	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery k8s-filebeat-kafka-outage-recovery
+	k8s-filebeat-fallback-acceptance k8s-filebeat-registry-recovery k8s-filebeat-kafka-outage-recovery perf
 
 # check 聚合所有只读工程门禁，适合提交前和持续集成调用。
-check: version-check fmt-check shell-check filebeat-validator-test grafana-query-validator-test vet test build kafka-topic-initializer-test
+check: version-check fmt-check shell-check log-producer-validator-test filebeat-validator-test grafana-query-validator-test vet test build kafka-topic-initializer-test
 
 # version-check 保证本地命令使用仓库约定的 Go 工具链。
 version-check:
@@ -146,6 +150,9 @@ shell-check:
 	bash -n $(SHELL_FILES)
 
 # Filebeat Kafka 校验器使用纯标准库 fixture 覆盖成功、未收齐与契约错误分支。
+log-producer-validator-test:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest scripts.test_validate_log_producer_output
+
 filebeat-validator-test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest scripts.test_validate_filebeat_kafka_output
 
@@ -274,6 +281,12 @@ k8s-processor-runtime-check: k8s-context-check
 k8s-processor-acceptance: k8s-processor-image-check k8s-processor-runtime-check
 	@PROCESSOR_ACCEPTANCE_RUN_ID='$(PROCESSOR_ACCEPTANCE_RUN_ID)' \
 		scripts/run-processor-deployment-acceptance.sh
+
+# perf 运行两条真实日志源到 Elasticsearch 的固定 60 秒硬性吞吐验收。
+perf: k8s-processor-image-check k8s-processor-runtime-check
+	@THROUGHPUT_RUN_ID='$(THROUGHPUT_RUN_ID)' \
+		THROUGHPUT_TIMEOUT_SECONDS='$(THROUGHPUT_TIMEOUT_SECONDS)' \
+		scripts/run-throughput-acceptance.sh
 
 # k8s-deploy 通过准入和节点镜像门禁后部署应用，并等待处理器真实就绪。
 k8s-deploy: k8s-validate k8s-processor-image-check
