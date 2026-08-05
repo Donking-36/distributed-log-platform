@@ -90,6 +90,22 @@ func buildApplication(cfg config, logger *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("创建有界投递周期: %w", err)
 	}
+	batchProcessor, err := pipeline.NewBatchProcessor(
+		pipeline.Config{
+			Index:         cfg.ElasticsearchIndex,
+			WriteTimeout:  cfg.WriteTimeout,
+			CommitTimeout: cfg.CommitTimeout,
+		},
+		searchClient,
+		consumer,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建批量处理器: %w", err)
+	}
+	batchDeliveryCycle, err := pipeline.NewBatchDeliveryCycle(batchProcessor)
+	if err != nil {
+		return nil, fmt.Errorf("创建批量有界投递周期: %w", err)
+	}
 	deadLetterHandler, err := pipeline.NewDeadLetterHandler(
 		pipeline.DeadLetterConfig{
 			PublishTimeout: cfg.DeadLetterPublishTimeout,
@@ -101,9 +117,16 @@ func buildApplication(cfg config, logger *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("创建死信处理器: %w", err)
 	}
-	runner, err := pipeline.NewRunner(consumer, deliveryCycle, deadLetterHandler, logger)
+	runner, err := pipeline.NewBatchRunner(
+		cfg.BatchSize,
+		consumer,
+		batchDeliveryCycle,
+		deliveryCycle,
+		deadLetterHandler,
+		logger,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("创建处理循环: %w", err)
+		return nil, fmt.Errorf("创建批量处理循环: %w", err)
 	}
 	healthState := newHealthState()
 	healthServer, err := newHealthService(cfg.HealthAddress, healthState)

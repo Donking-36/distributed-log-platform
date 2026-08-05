@@ -21,11 +21,14 @@ const (
 	processorCommitTimeoutEnv            = "PROCESSOR_COMMIT_TIMEOUT"
 	processorDeadLetterPublishTimeoutEnv = "PROCESSOR_DLQ_PUBLISH_TIMEOUT"
 	processorHealthAddressEnv            = "PROCESSOR_HEALTH_ADDRESS"
+	processorBatchSizeEnv                = "PROCESSOR_BATCH_SIZE"
 
 	defaultWriteTimeout             = 10 * time.Second
 	defaultCommitTimeout            = 10 * time.Second
 	defaultDeadLetterPublishTimeout = 10 * time.Second
 	defaultHealthAddress            = ":8080"
+	defaultBatchSize                = 500
+	maximumBatchSize                = 5000
 )
 
 // config 保存 log-processor 启动所需的完整命令级配置。
@@ -39,6 +42,7 @@ type config struct {
 	CommitTimeout            time.Duration
 	DeadLetterPublishTimeout time.Duration
 	HealthAddress            string
+	BatchSize                int
 }
 
 // loadConfig 读取、规范化并一次性校验环境配置，避免处理循环接收半有效状态。
@@ -110,6 +114,15 @@ func loadConfig(lookupEnv func(string) (string, bool)) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	batchSize, err := optionalBoundedPositiveInt(
+		lookupEnv,
+		processorBatchSizeEnv,
+		defaultBatchSize,
+		maximumBatchSize,
+	)
+	if err != nil {
+		return config{}, err
+	}
 
 	return config{
 		KafkaBrokers:             brokers,
@@ -121,6 +134,7 @@ func loadConfig(lookupEnv func(string) (string, bool)) (config, error) {
 		CommitTimeout:            commitTimeout,
 		DeadLetterPublishTimeout: deadLetterPublishTimeout,
 		HealthAddress:            healthAddress,
+		BatchSize:                batchSize,
 	}, nil
 }
 
@@ -179,6 +193,26 @@ func optionalPositiveDuration(
 		return 0, fmt.Errorf("%s 必须大于 0", name)
 	}
 	return duration, nil
+}
+
+func optionalBoundedPositiveInt(
+	lookupEnv func(string) (string, bool),
+	name string,
+	defaultValue int,
+	maximum int,
+) (int, error) {
+	value, exists := lookupEnv(name)
+	if !exists {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("%s 必须是整数: %w", name, err)
+	}
+	if parsed < 1 || parsed > maximum {
+		return 0, fmt.Errorf("%s 必须在 1 到 %d 之间", name, maximum)
+	}
+	return parsed, nil
 }
 
 // optionalListenAddress 校验显式数值端口，避免把拼写错误拖到依赖组装之后。

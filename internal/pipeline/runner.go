@@ -92,55 +92,73 @@ func (runner *Runner) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("拉取下一条 Kafka 记录: %w", err)
 		}
-
-		delivery, deliveryErr := runner.deliver(ctx, record)
-		if deliveryErr == nil {
-			if err := validateCommittedDelivery(delivery); err != nil {
-				return recordError(record, "校验已完成投递", err)
-			}
-			runner.logger.DebugContext(
-				ctx,
-				"日志记录已写入并提交",
-				"topic", record.Topic,
-				"partition", record.Partition,
-				"offset", record.Offset,
-				"result", delivery.LastResult.Kind,
-				"attempts", delivery.Attempts,
-			)
-			continue
-		}
-
-		if delivery.LastResult.Kind != ResultInvalid {
-			return fmt.Errorf("当前 Kafka 记录投递未完成: %w", deliveryErr)
-		}
-		if err := ctx.Err(); err != nil {
-			return recordError(record, "进入死信处理前 context 已取消", err)
-		}
-
-		deadLetterResult, err := runner.handleDeadLetter(ctx, record, delivery, deliveryErr)
-		if err != nil {
-			return fmt.Errorf("当前 Kafka 记录死信处理未完成: %w", err)
-		}
-		if !deadLetterResult.Published || !deadLetterResult.Committed {
-			return recordError(
-				record,
-				"校验死信处理结果",
-				fmt.Errorf(
-					"published=%t, committed=%t，期望均为 true",
-					deadLetterResult.Published,
-					deadLetterResult.Committed,
-				),
-			)
-		}
-		runner.logger.WarnContext(
+		if err := handleSingleRecord(
 			ctx,
-			"永久无效日志已隔离并提交",
+			record,
+			runner.deliver,
+			runner.handleDeadLetter,
+			runner.logger,
+		); err != nil {
+			return err
+		}
+	}
+}
+
+func handleSingleRecord(
+	ctx context.Context,
+	record kafka.Record,
+	deliver deliverRecordFunc,
+	handleDeadLetter handleDeadLetterFunc,
+	logger *slog.Logger,
+) error {
+	delivery, deliveryErr := deliver(ctx, record)
+	if deliveryErr == nil {
+		if err := validateCommittedDelivery(delivery); err != nil {
+			return recordError(record, "校验已完成投递", err)
+		}
+		logger.DebugContext(
+			ctx,
+			"日志记录已写入并提交",
 			"topic", record.Topic,
 			"partition", record.Partition,
 			"offset", record.Offset,
+			"result", delivery.LastResult.Kind,
 			"attempts", delivery.Attempts,
 		)
+		return nil
 	}
+
+	if delivery.LastResult.Kind != ResultInvalid {
+		return fmt.Errorf("当前 Kafka 记录投递未完成: %w", deliveryErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return recordError(record, "进入死信处理前 context 已取消", err)
+	}
+
+	deadLetterResult, err := handleDeadLetter(ctx, record, delivery, deliveryErr)
+	if err != nil {
+		return fmt.Errorf("当前 Kafka 记录死信处理未完成: %w", err)
+	}
+	if !deadLetterResult.Published || !deadLetterResult.Committed {
+		return recordError(
+			record,
+			"校验死信处理结果",
+			fmt.Errorf(
+				"published=%t, committed=%t，期望均为 true",
+				deadLetterResult.Published,
+				deadLetterResult.Committed,
+			),
+		)
+	}
+	logger.WarnContext(
+		ctx,
+		"永久无效日志已隔离并提交",
+		"topic", record.Topic,
+		"partition", record.Partition,
+		"offset", record.Offset,
+		"attempts", delivery.Attempts,
+	)
+	return nil
 }
 
 func validateCommittedDelivery(delivery DeliveryResult) error {

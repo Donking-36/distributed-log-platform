@@ -172,6 +172,124 @@ func TestConsumerRetainsPendingAfterCommitFailure(t *testing.T) {
 	}
 }
 
+func TestConsumerPollBatchProjectsAndCommitsOnce(t *testing.T) {
+	t.Parallel()
+
+	raw := []*kgo.Record{
+		{Topic: "logs.api-service", Partition: 0, Offset: 10, Value: []byte("first")},
+		{Topic: "logs.api-service", Partition: 1, Offset: 20, Value: []byte("second")},
+		{Topic: "logs.worker-service", Partition: 2, Offset: 30, Value: []byte("third")},
+	}
+	client := &fakeConsumerClient{records: raw}
+	consumer := newConsumer(client)
+	t.Cleanup(consumer.Close)
+
+	records, err := consumer.PollBatch(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("批量拉取: %v", err)
+	}
+	if len(records) != 3 || client.pollLimits[0] != 3 {
+		t.Fatalf("批量记录数/拉取上限 = %d/%d，期望 3/3", len(records), client.pollLimits[0])
+	}
+	for index := range records {
+		if records[index].Offset != raw[index].Offset || string(records[index].Value) != string(raw[index].Value) {
+			t.Fatalf("第 %d 条投影记录 = %#v，期望来源 %#v", index, records[index], raw[index])
+		}
+	}
+	raw[0].Value[0] = 'X'
+	if string(records[0].Value) != "first" {
+		t.Fatalf("批量投影被底层缓冲区修改: %q", records[0].Value)
+	}
+
+	if err := consumer.CommitBatch(context.Background(), records); err != nil {
+		t.Fatalf("批量提交: %v", err)
+	}
+	if client.commitCalls != 1 || len(client.committed) != 3 || client.allowCalls != 1 {
+		t.Fatalf("commit calls/records/allows = %d/%d/%d，期望 1/3/1",
+			client.commitCalls, len(client.committed), client.allowCalls)
+	}
+}
+
+func TestConsumerBatchFallbackCommitsOnlyPendingPrefix(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeConsumerClient{records: []*kgo.Record{
+		{Topic: "logs.api-service", Partition: 0, Offset: 40},
+		{Topic: "logs.api-service", Partition: 0, Offset: 41},
+	}}
+	consumer := newConsumer(client)
+	t.Cleanup(consumer.Close)
+
+	records, err := consumer.PollBatch(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("批量拉取: %v", err)
+	}
+	if err := consumer.Commit(context.Background(), records[1]); !errors.Is(err, ErrRecordNotPending) {
+		t.Fatalf("跨过批次首条提交错误 = %v，期望 %v", err, ErrRecordNotPending)
+	}
+	if err := consumer.CommitBatch(context.Background(), []Record{records[0]}); !errors.Is(err, ErrRecordNotPending) {
+		t.Fatalf("不完整批量提交错误 = %v，期望 %v", err, ErrRecordNotPending)
+	}
+
+	if err := consumer.Commit(context.Background(), records[0]); err != nil {
+		t.Fatalf("提交批次首条: %v", err)
+	}
+	if client.allowCalls != 0 {
+		t.Fatalf("批次仍有待确认记录时放行重平衡次数 = %d，期望 0", client.allowCalls)
+	}
+	if _, err := consumer.PollBatch(context.Background(), 2); !errors.Is(err, ErrRecordPending) {
+		t.Fatalf("批次未清空时再次拉取错误 = %v，期望 %v", err, ErrRecordPending)
+	}
+	if err := consumer.Commit(context.Background(), records[1]); err != nil {
+		t.Fatalf("提交批次第二条: %v", err)
+	}
+	if client.commitCalls != 2 || client.allowCalls != 1 {
+		t.Fatalf("commit calls/allows = %d/%d，期望 2/1", client.commitCalls, client.allowCalls)
+	}
+}
+
+func TestConsumerRetainsWholeBatchAfterCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("temporary batch commit failure")
+	client := &fakeConsumerClient{
+		records: []*kgo.Record{
+			{Topic: "logs.api-service", Partition: 0, Offset: 50},
+			{Topic: "logs.worker-service", Partition: 1, Offset: 60},
+		},
+		commitErrs: []error{wantErr, nil},
+	}
+	consumer := newConsumer(client)
+	t.Cleanup(consumer.Close)
+
+	records, err := consumer.PollBatch(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("批量拉取: %v", err)
+	}
+	if err := consumer.CommitBatch(context.Background(), records); !errors.Is(err, wantErr) {
+		t.Fatalf("首次批量提交错误 = %v，期望 %v", err, wantErr)
+	}
+	if client.allowCalls != 0 {
+		t.Fatalf("批量提交失败后放行重平衡次数 = %d，期望 0", client.allowCalls)
+	}
+	if err := consumer.CommitBatch(context.Background(), records); err != nil {
+		t.Fatalf("重试批量提交: %v", err)
+	}
+	if client.commitCalls != 2 || client.allowCalls != 1 {
+		t.Fatalf("commit calls/allows = %d/%d，期望 2/1", client.commitCalls, client.allowCalls)
+	}
+}
+
+func TestConsumerRejectsInvalidBatchLimit(t *testing.T) {
+	t.Parallel()
+
+	consumer := newConsumer(&fakeConsumerClient{})
+	t.Cleanup(consumer.Close)
+	if _, err := consumer.PollBatch(context.Background(), 0); err == nil {
+		t.Fatal("零批量上限期望失败")
+	}
+}
+
 func TestConsumerCanceledPollReleasesRebalanceBeforeClose(t *testing.T) {
 	t.Parallel()
 
@@ -223,9 +341,9 @@ func TestInspectFetchesPreservesRecordAndPartitionError(t *testing.T) {
 		}},
 	}}
 
-	record, err := inspectFetches(fetches)
-	if record != wantRecord {
-		t.Fatalf("返回记录 = %#v，期望 %#v", record, wantRecord)
+	records, err := inspectFetches(fetches)
+	if len(records) != 1 || records[0] != wantRecord {
+		t.Fatalf("返回记录 = %#v，期望 [%#v]", records, wantRecord)
 	}
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("返回错误 = %v，期望包含 %v", err, wantErr)
@@ -235,9 +353,9 @@ func TestInspectFetchesPreservesRecordAndPartitionError(t *testing.T) {
 	}
 
 	fakeErr := context.DeadlineExceeded
-	record, err = inspectFetches(kgo.NewErrFetch(fakeErr))
-	if record != nil || !errors.Is(err, fakeErr) {
-		t.Fatalf("错误 fetch 返回 record=%#v err=%v，期望 nil/%v", record, err, fakeErr)
+	records, err = inspectFetches(kgo.NewErrFetch(fakeErr))
+	if len(records) != 0 || !errors.Is(err, fakeErr) {
+		t.Fatalf("错误 fetch 返回 records=%#v err=%v，期望空/%v", records, err, fakeErr)
 	}
 }
 
@@ -317,13 +435,14 @@ type fakeConsumerClient struct {
 	pollErr    error
 	commitErrs []error
 
-	pollLimits []int
-	committed  []*kgo.Record
-	allowCalls int
-	closeCalls int
+	pollLimits  []int
+	committed   []*kgo.Record
+	allowCalls  int
+	closeCalls  int
+	commitCalls int
 }
 
-func (client *fakeConsumerClient) poll(_ context.Context, maxRecords int) (*kgo.Record, error) {
+func (client *fakeConsumerClient) poll(_ context.Context, maxRecords int) ([]*kgo.Record, error) {
 	client.pollLimits = append(client.pollLimits, maxRecords)
 	if client.pollErr != nil {
 		return nil, client.pollErr
@@ -331,13 +450,28 @@ func (client *fakeConsumerClient) poll(_ context.Context, maxRecords int) (*kgo.
 	if len(client.records) == 0 {
 		return nil, nil
 	}
-	record := client.records[0]
-	client.records = client.records[1:]
-	return record, nil
+	if client.records[0] == nil {
+		client.records = client.records[1:]
+		return nil, nil
+	}
+	count := maxRecords
+	if count > len(client.records) {
+		count = len(client.records)
+	}
+	for index := 0; index < count; index++ {
+		if client.records[index] == nil {
+			count = index
+			break
+		}
+	}
+	records := append([]*kgo.Record(nil), client.records[:count]...)
+	client.records = client.records[count:]
+	return records, nil
 }
 
-func (client *fakeConsumerClient) commit(_ context.Context, record *kgo.Record) error {
-	client.committed = append(client.committed, record)
+func (client *fakeConsumerClient) commit(_ context.Context, records []*kgo.Record) error {
+	client.commitCalls++
+	client.committed = append(client.committed, records...)
 	if len(client.commitErrs) == 0 {
 		return nil
 	}

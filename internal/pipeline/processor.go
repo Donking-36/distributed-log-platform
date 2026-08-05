@@ -64,32 +64,44 @@ func newProcessor(
 	committer RecordCommitter,
 	now func() time.Time,
 ) (*Processor, error) {
-	config.Index = strings.TrimSpace(config.Index)
-	if config.Index == "" {
-		return nil, errors.New("Elasticsearch 索引名不能为空")
-	}
-	if config.WriteTimeout <= 0 {
-		return nil, errors.New("Elasticsearch 写入超时必须大于 0")
-	}
-	if config.CommitTimeout <= 0 {
-		return nil, errors.New("Kafka 提交超时必须大于 0")
-	}
-	if writer == nil {
-		return nil, errors.New("Elasticsearch BulkWriter 不能为空")
+	validatedConfig, err := validateProcessingDependencies(config, writer, now)
+	if err != nil {
+		return nil, err
 	}
 	if committer == nil {
 		return nil, errors.New("Kafka RecordCommitter 不能为空")
 	}
-	if now == nil {
-		return nil, errors.New("处理器时钟不能为空")
-	}
 
 	return &Processor{
-		config:    config,
+		config:    validatedConfig,
 		writer:    writer,
 		committer: committer,
 		now:       now,
 	}, nil
+}
+
+func validateProcessingDependencies(
+	config Config,
+	writer BulkWriter,
+	now func() time.Time,
+) (Config, error) {
+	config.Index = strings.TrimSpace(config.Index)
+	if config.Index == "" {
+		return Config{}, errors.New("Elasticsearch 索引名不能为空")
+	}
+	if config.WriteTimeout <= 0 {
+		return Config{}, errors.New("Elasticsearch 写入超时必须大于 0")
+	}
+	if config.CommitTimeout <= 0 {
+		return Config{}, errors.New("Kafka 提交超时必须大于 0")
+	}
+	if writer == nil {
+		return Config{}, errors.New("Elasticsearch BulkWriter 不能为空")
+	}
+	if now == nil {
+		return Config{}, errors.New("处理器时钟不能为空")
+	}
+	return config, nil
 }
 
 // Process 依次解析、构造文档、执行一次 Bulk create，并按逐项结果决定是否提交。
