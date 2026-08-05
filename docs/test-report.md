@@ -969,9 +969,9 @@ git diff --check
 关闭，Runner 与 Shutdown 同时失败时两个错误都会保留。HTTP 在程序主动 Shutdown
 之前返回 `http.ErrServerClosed` 仍被视为异常，不会伪装成正常退出。
 
-本节只证明进程内端点、状态和并发退出契约，不代表 Kubernetes 探针已经配置或
-验证。实际 Pod 的 startup/readiness/liveness 参数、SIGTERM 期间摘除流量和
-Restricted 非根容器监听将在部署切片中验证。
+本节证明进程内端点、状态和并发退出契约；Kubernetes 探针和 Restricted 运行证据
+见后续部署小节。SIGTERM 期间实际摘除就绪与完整退出预算仍需在 Pod 重启恢复验收
+中验证。
 
 ### log-processor 容器镜像
 
@@ -1005,8 +1005,51 @@ ldd: /usr/local/bin/log-processor: Not a valid dynamic program
 `PROCESSOR_KAFKA_BROKERS 不能为空`。`IMAGE_TAG=invalid` 在 Docker 构建前以状态 2
 被标签门禁拒绝；默认 `dev` 构建成功。最终 `make check` 通过。
 
-本节只证明镜像构建、运行身份、静态链接、入口和启动配置反例，不代表处理器已经
-部署到 Kubernetes，也不证明 Pod 探针、网络连通、优雅终止或重启恢复。
+本节证明镜像构建、运行身份、静态链接、入口和启动配置反例；部署及真实网络证据
+见下一小节，优雅终止和重启恢复仍未验证。
+
+### log-processor Kubernetes 部署
+
+2026-08-05 新增 `base/log-processor` 和镜像 component，并接入应用 `local`
+overlay。Deployment 为单副本 `Recreate`，通过哈希 ConfigMap 连接 Kafka 与
+Elasticsearch；配置 startup/readiness/liveness、30 秒终止宽限、资源边界及
+Restricted 非根安全上下文，不创建无用途的 Service 或空壳 Secret。
+
+第一次尝试使用节点 manifest 摘要作为 Pod 镜像引用；`minikube image load` 只注册
+标签引用，kubelet 因 `Never` 返回 `ErrImageNeverPull`。最终改用固定提交标签，且
+`make k8s-deploy` 在写集群前核对标签实际 manifest/config，rollout 后核对运行时
+config，避免把标签当身份。修复镜像 `9a776ee` 的节点证据为：
+
+```text
+manifest=sha256:37373150f7ce524d7b1b7511049158c5581e266134619125918f17de3581fc1a
+config=sha256:e5a4ada2bba195d7e3541d60e1639eec6b60508cf6115f9d556543672731a05e
+Pod imageID=sha256:e5a4ada2bba195d7e3541d60e1639eec6b60508cf6115f9d556543672731a05e
+```
+
+旧镜像首次处理真实积压时写入 33,991 个文档，但 franz-go 在重平衡/内部唤醒时一次
+返回零记录、零错误，Consumer 将其误判为致命 `Kafka 拉取未返回记录`，Pod 因而
+CrashLoop。`331abb4 fix(kafka): tolerate empty polls` 改为在没有待确认记录时放行
+重平衡并继续同一次 Poll，新增“空结果后取得记录”的相邻测试；
+`go test -race ./internal/kafka` 通过。
+
+修复镜像部署后，连续 50 秒的五次观察均为：
+
+```text
+READY=true PHASE=Running RESTARTS=0
+```
+
+Kafka 消费者组 `stage3-log-processor-v1` 将两个持续分区从约 17k 位点推进到末端，
+最终 `logs.api-service/1` 和 `logs.worker-service/2` 均为 LAG=0。其他四个业务分区
+没有提交点，但 `kafka-get-offsets --time -2` 证明 earliest 与 log-end 分别同为
+20、100、20、40，记录已按 24 小时保留策略淘汰，不是消费饥饿。
+
+Elasticsearch `logs-stage3-v1/_count` 在同一过程从 33,991 增长到 115,301；抽样
+文档包含稳定 `event_id`、业务时间、`ingested_at`、服务名、Pod UID、container ID、
+原始路径、offset 和消息。稳定窗口结束时 processor 没有错误日志。
+
+这些数据来自关机恢复后的真实历史积压与两个持续 producer，不是隔离的精确数量
+验收，因此只证明部署、探针、Kafka 消费和 Elasticsearch 写入连通。重复投递唯一
+文档数、Pod 删除后的续读、SIGTERM 就绪摘除及故障恢复仍需后续独立验证。
 
 ### 当前边界
 
@@ -1018,6 +1061,6 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 生产容量；Elasticsearch 服务端、Go Bulk 写入和 Kafka 单条显式提交边界已经覆盖，
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
 Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
-Kafka、Elasticsearch 和 DLQ。尚未覆盖重复投递、多记录/多分区连续前缀位点推进、
-真实重平衡、提交失败或响应丢失后的真实恢复、处理器健康接口的 Kubernetes 探针、
-部署、处理器重启、端到端恢复以及 Grafana 查询链路。
+Kafka、Elasticsearch 和 DLQ，持续 Deployment 也已处理真实历史积压。尚未覆盖
+重复投递、多记录/多分区连续前缀位点推进、真实重平衡、提交失败或响应丢失后的
+真实恢复、SIGTERM 摘除、处理器重启、端到端恢复以及 Grafana 查询链路。

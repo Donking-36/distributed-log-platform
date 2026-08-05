@@ -5,4 +5,4 @@ kind: Component
 images:
   - name: distributed-log-platform/log-processor
     newName: docker.io/distributed-log-platform/log-processor
-    newTag: 89effa6
+    newTag: 9a776ee
