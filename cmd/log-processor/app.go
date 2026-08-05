@@ -105,9 +105,16 @@ func buildApplication(cfg config, logger *slog.Logger) (
 	if err != nil {
 		return nil, fmt.Errorf("创建处理循环: %w", err)
 	}
+	healthState := newHealthState()
+	healthServer, err := newHealthService(cfg.HealthAddress, healthState)
+	if err != nil {
+		return nil, fmt.Errorf("创建健康检查服务: %w", err)
+	}
 
 	return &application{
-		run: runner.Run,
+		run: func(ctx context.Context) error {
+			return runApplication(ctx, runner.Run, healthServer, healthState)
+		},
 		close: func(ctx context.Context) error {
 			return closeApplicationResources(
 				ctx,

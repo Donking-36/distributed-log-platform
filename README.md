@@ -82,6 +82,12 @@ go run ./cmd/log-producer
 | `PROCESSOR_WRITE_TIMEOUT` | 否 | `10s` | 单次 Elasticsearch 写入超时 |
 | `PROCESSOR_COMMIT_TIMEOUT` | 否 | `10s` | Kafka 源位点提交超时 |
 | `PROCESSOR_DLQ_PUBLISH_TIMEOUT` | 否 | `10s` | DLQ 发布确认超时 |
+| `PROCESSOR_HEALTH_ADDRESS` | 否 | `:8080` | `/healthz`、`/readyz` 的监听地址，端口必须为 1～65535 的数字 |
+
+处理器运行时提供两个标准库 HTTP 探针：处理循环正常运行时两者均返回 200；
+优雅退出期间 `/readyz` 立即返回 503，而 `/healthz` 在 HTTP 排空完成前保持 200；
+启动未完成或任一运行单元异常退出时两者均为 503。探针请求不直接访问 Kafka 或
+Elasticsearch；依赖故障由 Runner 的运行结果驱动应用退出，避免探针制造额外流量。
 
 构建入口会同时链接两个程序，但不会在仓库中留下二进制：
 
@@ -91,8 +97,8 @@ make build
 
 真实 Kafka 4.3.1→Elasticsearch 9.4.4/DLQ 小载荷联动验收已经通过：有效记录写入
 Elasticsearch，永久无效记录写入 `logs.dlq` 并确认源位点，后续有效记录仍会继续
-处理。处理器健康接口、容器镜像、Kubernetes 部署、重复投递幂等和 Pod 重启恢复
-仍待完成。
+处理。处理器健康接口及其协同退出单元边界也已通过；处理器容器镜像、Kubernetes
+部署、重复投递幂等和 Pod 重启恢复仍待完成。
 
 ## 容器镜像
 
@@ -498,5 +504,5 @@ Runner 联动：唯一源主题按“有效→永久无效→有效”写入三�
 Runner 组提交点为 3、Elasticsearch 只有两条确定性 ID 文档、`logs.dlq` 恰好新增
 一条且 envelope/Base64 原文正确。临时主题、三个消费者组、临时 ES 索引和测试
 二进制都会删除并复核；共享 `logs.dlq` 的验收记录不被危险截断，由 24 小时保留
-策略清理。健康接口、处理器镜像、Kubernetes 部署、重复投递幂等和 Pod 重启恢复
-仍待实现。
+策略清理。健康接口已完成进程内状态和协同退出验证；处理器镜像、Kubernetes
+部署、重复投递幂等和 Pod 重启恢复仍待实现。

@@ -888,8 +888,8 @@ git diff --check
 ```
 
 本节证明最小串行循环、配置和生命周期契约已经接线并可构建；真实依赖证据见
-下一节。处理器健康接口、容器/Kubernetes 部署、重启恢复和完整 UC-001B 端到端
-链路仍待验证。
+下一节。处理器健康接口的进程内证据见后续独立小节；容器/Kubernetes 部署、
+重启恢复和完整 UC-001B 端到端链路仍待验证。
 
 ### 真实 Runner→Elasticsearch/DLQ 联动
 
@@ -934,6 +934,45 @@ offset 1、`error.field=service.name`、尝试次数 1、唯一 `test_run_id`，
 提交响应丢失、Elasticsearch/Kafka 故障、进程重启、多分区连续前缀和大载荷矩阵
 仍待后续验证。
 
+### log-processor 健康接口与协同退出
+
+2026-08-05 为 `cmd/log-processor` 增加标准库 HTTP 健康面。测试先行阶段因
+`healthState`、`healthService`、`runApplication` 和健康地址配置尚不存在而构建
+失败；实现后聚焦竞态测试通过：
+
+```text
+go test -count=20 -race ./cmd/log-processor
+ok github.com/Donking-36/distributed-log-platform/cmd/log-processor
+```
+
+最终全仓门禁也通过：
+
+```text
+make check
+go test -count=1 -race -cover ./...  # cmd/log-processor: 64.7%
+go mod verify
+git diff --check
+```
+
+状态语义固定为：
+
+| 阶段 | `/healthz` | `/readyz` |
+|---|---:|---:|
+| starting | 503 | 503 |
+| running | 200 | 200 |
+| draining | 200 | 503 |
+| stopped | 503 | 503 |
+
+配置测试覆盖默认 `:8080`、自定义地址、缺少端口、非数值端口和越界端口。处理器
+会先同步绑定健康端口，绑定失败时不会启动 Runner；运行后，Runner 异常或静默退出
+会关闭 HTTP，HTTP 异常退出会取消 Runner，父 context 取消会先撤销就绪再有界
+关闭，Runner 与 Shutdown 同时失败时两个错误都会保留。HTTP 在程序主动 Shutdown
+之前返回 `http.ErrServerClosed` 仍被视为异常，不会伪装成正常退出。
+
+本节只证明进程内端点、状态和并发退出契约，不代表 Kubernetes 探针已经配置或
+验证。实际 Pod 的 startup/readiness/liveness 参数、SIGTERM 期间摘除流量和
+Restricted 非根容器监听将在部署切片中验证。
+
 ### 当前边界
 
 本节已经证明镜像身份、配置反例、最小 RBAC、运行时安全、正常服务路由、Pod UID
@@ -945,5 +984,5 @@ Pod 重建后的 registry 连续性；还证明了受控单 Broker 1→0→1 的
 单记录的结果联动已在手写替身下验证，条件提交还通过了真实 Kafka 原始记录身份和
 Broker 位点复核；真实 Runner 的“有效→永久无效→有效”小载荷联动也已通过真实
 Kafka、Elasticsearch 和 DLQ。尚未覆盖重复投递、多记录/多分区连续前缀位点推进、
-真实重平衡、提交失败或响应丢失后的真实恢复、处理器健康接口、容器与 Kubernetes
-部署、处理器重启、端到端恢复以及 Grafana 查询链路。
+真实重平衡、提交失败或响应丢失后的真实恢复、处理器健康接口的 Kubernetes 探针、
+容器与部署、处理器重启、端到端恢复以及 Grafana 查询链路。

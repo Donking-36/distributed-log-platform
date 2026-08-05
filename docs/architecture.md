@@ -1,7 +1,7 @@
 # 架构
 
-- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 显式提交、六次有界投递、DLQ、串行入口及真实 Kafka→Elasticsearch/DLQ 小载荷联动已验证
-- 更新日期：2026-08-04
+- 状态：UC-001A 已验证；UC-001B 的解析、事件 ID、Elasticsearch 服务端、Go Bulk 写入、Kafka 显式提交、六次有界投递、DLQ、串行入口、健康接口及真实 Kafka→Elasticsearch/DLQ 小载荷联动已验证
+- 更新日期：2026-08-05
 - 部署目标：WSL2 Minikube 的 `stage3-logs` 配置实例
 
 ## 1. 目标与约束
@@ -180,17 +180,24 @@ Kafka record 的 topic/partition/offset 属于传输层；`internal/event.LogOff
 `cmd/log-processor` 只保留命令级职责，并按文件拆分：
 
 - `config.go` 与 `config_test.go`：读取、规范化并校验 Broker、消费者组、源主题、
-  Elasticsearch 地址/索引和三个独立超时；拒绝重复成员、空成员和订阅
-  `logs.dlq`，避免死信循环；
+  Elasticsearch 地址/索引、三个独立超时和健康监听地址；拒绝重复成员、空成员、
+  非数值或越界端口和订阅 `logs.dlq`，避免死信循环；
 - `app.go` 与 `app_test.go`：按 Consumer→Elasticsearch→DLQ Producer→Processor
-  →DeliveryCycle→DeadLetterHandler→Runner 的顺序组装真实依赖。启动中途失败会
-  清理已创建资源；退出时并行启动三个资源的关闭，使 Kafka 离组阻塞不会阻止
-  DLQ 与 Elasticsearch 清理，统一等待受 10 秒预算约束；
+  →DeliveryCycle→DeadLetterHandler→Runner→Health Service 的顺序组装真实依赖。
+  启动中途失败会清理已创建资源；退出时并行启动三个外部客户端的关闭，使 Kafka
+  离组阻塞不会阻止 DLQ 与 Elasticsearch 清理，统一等待受 10 秒预算约束；
+- `health.go` 与 `health_test.go`：使用标准库 `net/http` 暴露 `/healthz` 和
+  `/readyz`，用单一原子阶段表达 starting、running、draining、stopped，防止健康
+  与就绪组合矛盾。请求不直接探测 Kafka 或 Elasticsearch；
+- `runtime.go` 与 `runtime_test.go`：先同步绑定健康端口，再并发启动 HTTP 和 Runner；
+  任一方异常退出会撤销就绪、取消另一方并保留原始错误。父级取消时先进入
+  draining，HTTP 有界排空完成后再进入 stopped；
 - `main.go` 与 `main_test.go`：建立 SIGINT/SIGTERM context、结构化日志和退出码，
   区分正常信号取消与意外取消，并保证运行失败后仍执行独立的有界关闭。
 
-命令入口不重复实现解析、重试、DLQ 或位点规则；健康接口、容器和 Kubernetes
-部署仍是后续纵向切片。
+命令入口不重复实现解析、重试、DLQ 或位点规则；处理器容器和 Kubernetes 部署
+仍是后续纵向切片。当前健康语义已在进程内验证，实际 Pod 探针路径、阈值和终止
+期间 Ready 状态变化要在部署切片中继续验证。
 
 Prometheus、metrics-server 集成、HPA 和 Alertmanager 均推迟到
 UC-001/UC-002 验收链路全绿之后。
