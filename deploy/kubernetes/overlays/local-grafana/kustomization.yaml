@@ -7,7 +7,7 @@ resources:
   - ../../base/namespace
   - ../../base/grafana
 
-# 本地节点使用已旁加载的固定标签；Make 门禁负责核对标签背后的实际镜像身份。
+# 本地节点使用已旁加载的明确版本；部署入口只检查镜像存在和 Pod 就绪。
 patches:
   - target:
       group: apps

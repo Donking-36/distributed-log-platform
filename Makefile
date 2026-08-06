@@ -53,55 +53,28 @@ FILEBEAT_OUTAGE_PROBE_TIMEOUT ?= 45s
 FILEBEAT_VERSION ?= 9.4.4
 FILEBEAT_LOCAL_IMAGE ?= docker.elastic.co/beats/filebeat-wolfi:9.4.4
 
-# 这些值与 local-kafka overlay 构成同一镜像身份基线，更新时必须连同证据一起修改。
-override KAFKA_NODE_IMAGE := docker.io/apache/kafka:4.3.1
-override EXPECTED_KAFKA_MANIFEST_DIGEST := sha256:f8f865a3222d807cf1e6c515ca447cb2fb604ddc57f0a007a02a9ce79bd7a511
-override EXPECTED_KAFKA_CONFIG_DIGEST := sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11
+# 第三方组件保留明确版本，自研组件使用目标机器重新构建的 dev 镜像。
+# Minikube 导入产生的机器相关摘要不进入仓库，也不作为部署前置条件。
+KAFKA_NODE_IMAGE ?= docker.io/apache/kafka:4.3.1
+FILEBEAT_NODE_IMAGE ?= docker.elastic.co/beats/filebeat-wolfi:9.4.4
+ELASTICSEARCH_NODE_IMAGE ?= docker.io/library/elasticsearch:9.4.4
+GRAFANA_NODE_IMAGE ?= docker.io/grafana/grafana:13.1.0
+PROCESSOR_NODE_IMAGE ?= docker.io/distributed-log-platform/log-processor:dev
 
-# Filebeat 使用官方 Wolfi 9.4.4；旁加载转换后的摘要必须与上游证据分别保存。
-override FILEBEAT_NODE_IMAGE := docker.elastic.co/beats/filebeat-wolfi:9.4.4
-override EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST := sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca
-override EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST := sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379
-override EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST := sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9
-override EXPECTED_FILEBEAT_CONFIG_DIGEST := sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf
-
-# Elasticsearch 使用 Elastic Team 维护的 Docker Official Image；节点摘要记录旁加载后的实际身份。
-override ELASTICSEARCH_NODE_IMAGE := docker.io/library/elasticsearch:9.4.4
-override EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST := sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677
-override EXPECTED_ELASTICSEARCH_CONFIG_DIGEST := sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640
-
-# Grafana 本地旁加载会转换 manifest；上游、节点 manifest 与 config 分别记录。
-override GRAFANA_NODE_IMAGE := docker.io/grafana/grafana:13.1.0
-override EXPECTED_GRAFANA_UPSTREAM_INDEX_DIGEST := sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
-override EXPECTED_GRAFANA_UPSTREAM_AMD64_DIGEST := sha256:6ea068891652aa6a65ca9065c26b89de939653803c836426970305c11fd00534
-override EXPECTED_GRAFANA_MANIFEST_DIGEST := sha256:aafe62002b2ed4586c824338875f70ccffceadc47f3a699c1918771e656e1f2a
-override EXPECTED_GRAFANA_CONFIG_DIGEST := sha256:e76fd1761e3cc1dd6071a53484b72762f8b358bb1ecd89c9e21d57090956998e
-
-# 自研镜像旁加载后会转换 manifest；节点摘要与 component 必须在同一提交中更新。
-override PROCESSOR_NODE_IMAGE := docker.io/distributed-log-platform/log-processor:84073f7
-override EXPECTED_PROCESSOR_MANIFEST_DIGEST := sha256:a084b79a827101c984c00c7c7dc85b4f8ef5321d3e62a7a4b78dd45249b0512c
-override EXPECTED_PROCESSOR_CONFIG_DIGEST := sha256:c8c95b401c855e8f994fe04100307627bff2b253af9966c19634adb4867544ae
-
-# 镜像校验脚本只读取显式导出的项目参数，不自行维护另一份摘要常量。
 export MINIKUBE KUBECTL KUBE_CONTEXT KUBE_NAMESPACE KAFKA_NODE_IMAGE
-export EXPECTED_KAFKA_MANIFEST_DIGEST EXPECTED_KAFKA_CONFIG_DIGEST
 export KUSTOMIZE_KAFKA_TOPICS_OVERLAY KAFKA_TOPIC_INIT_TIMEOUT
 export KAFKA_CONSUMER_INTEGRATION_TIMEOUT KAFKA_CONSUMER_TEST_RUN_ID
 export DOCKER KUSTOMIZE_FILEBEAT_OVERLAY FILEBEAT_NAMESPACE FILEBEAT_ROLLOUT_TIMEOUT FILEBEAT_LOCAL_IMAGE
 export FILEBEAT_ACCEPTANCE_TIMEOUT FILEBEAT_ACCEPTANCE_SETTLE_SECONDS FILEBEAT_ACCEPTANCE_MAX_RECORDS FILEBEAT_VERSION
 export FILEBEAT_FALLBACK_TIMEOUT FILEBEAT_RECOVERY_TIMEOUT FILEBEAT_RECOVERY_SETTLE_SECONDS
 export FILEBEAT_OUTAGE_TIMEOUT FILEBEAT_OUTAGE_SETTLE_SECONDS FILEBEAT_OUTAGE_PROBE_TIMEOUT
-export FILEBEAT_NODE_IMAGE EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST
-export EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST EXPECTED_FILEBEAT_CONFIG_DIGEST
+export FILEBEAT_NODE_IMAGE
 export KUSTOMIZE_ELASTICSEARCH_OVERLAY ELASTICSEARCH_ROLLOUT_TIMEOUT ELASTICSEARCH_NODE_IMAGE
-export EXPECTED_ELASTICSEARCH_MANIFEST_DIGEST EXPECTED_ELASTICSEARCH_CONFIG_DIGEST
 export KUSTOMIZE_GRAFANA_OVERLAY GRAFANA_ROLLOUT_TIMEOUT GRAFANA_NODE_IMAGE
-export EXPECTED_GRAFANA_UPSTREAM_INDEX_DIGEST EXPECTED_GRAFANA_UPSTREAM_AMD64_DIGEST
-export EXPECTED_GRAFANA_MANIFEST_DIGEST EXPECTED_GRAFANA_CONFIG_DIGEST
 export GRAFANA_ACCEPTANCE_RUN_ID GRAFANA_ACCEPTANCE_SAMPLES
 export KUSTOMIZE_THROUGHPUT_OVERLAY THROUGHPUT_RUN_ID THROUGHPUT_TIMEOUT_SECONDS
 
-.PHONY: check version-check fmt fmt-check shell-check log-producer-validator-test filebeat-validator-test grafana-query-validator-test vet test build validate-image-tag image processor-image \
+.PHONY: check version-check fmt fmt-check shell-check log-producer-validator-test filebeat-validator-test grafana-query-validator-test vet test build validate-image-tag image processor-image k8s-images k8s-load-images \
 	k8s-context-check k8s-render k8s-validate k8s-processor-image-check \
 	k8s-processor-runtime-check k8s-processor-acceptance k8s-deploy k8s-status \
 	k8s-acceptance-render k8s-acceptance k8s-kafka-render k8s-kafka-validate k8s-kafka-image-check \
@@ -211,6 +184,25 @@ processor-image: validate-image-tag
 		--tag $(PROCESSOR_IMAGE_REPOSITORY):$(IMAGE_TAG) \
 		.
 
+# k8s-images 在目标机器准备全部本地演示镜像；重复执行会复用 Docker 缓存。
+k8s-images: k8s-context-check
+	@$(MAKE) --no-print-directory image processor-image IMAGE_TAG=dev
+	@$(DOCKER) image inspect $(KAFKA_NODE_IMAGE) >/dev/null 2>&1 || $(DOCKER) pull $(KAFKA_NODE_IMAGE)
+	@$(DOCKER) image inspect $(FILEBEAT_NODE_IMAGE) >/dev/null 2>&1 || $(DOCKER) pull $(FILEBEAT_NODE_IMAGE)
+	@$(DOCKER) image inspect $(ELASTICSEARCH_NODE_IMAGE) >/dev/null 2>&1 || $(DOCKER) pull $(ELASTICSEARCH_NODE_IMAGE)
+	@$(DOCKER) image inspect $(GRAFANA_NODE_IMAGE) >/dev/null 2>&1 || $(DOCKER) pull $(GRAFANA_NODE_IMAGE)
+	@$(MAKE) --no-print-directory k8s-load-images
+
+# k8s-load-images 只加载本机已有镜像，供离线迁移包恢复时使用。
+k8s-load-images: k8s-context-check
+	$(MINIKUBE) image load -p $(KUBE_CONTEXT) --overwrite=true $(IMAGE_REPOSITORY):dev
+	$(MINIKUBE) image load -p $(KUBE_CONTEXT) --overwrite=true $(PROCESSOR_IMAGE_REPOSITORY):dev
+	$(MINIKUBE) image load -p $(KUBE_CONTEXT) --overwrite=true $(KAFKA_NODE_IMAGE)
+	$(MINIKUBE) image load -p $(KUBE_CONTEXT) --overwrite=true $(FILEBEAT_NODE_IMAGE)
+	$(MINIKUBE) image load -p $(KUBE_CONTEXT) --overwrite=true $(ELASTICSEARCH_NODE_IMAGE)
+	$(MINIKUBE) image load -p $(KUBE_CONTEXT) --overwrite=true $(GRAFANA_NODE_IMAGE)
+	@echo "本地演示镜像已加载到 $(KUBE_CONTEXT)"
+
 # k8s-context-check 在任何集群写操作前确认当前上下文，防止误操作其他集群。
 k8s-context-check:
 	@actual="$$($(KUBECTL) config current-context)"; \
@@ -236,27 +228,16 @@ k8s-validate: k8s-context-check
 		--dry-run=server \
 		-k $(KUSTOMIZE_OVERLAY)
 
-# k8s-processor-image-check 在写集群前核对节点实际 manifest 与 config 摘要。
+# k8s-processor-image-check 确认目标机器已经加载本地处理器镜像。
 k8s-processor-image-check: k8s-context-check
-	@image_table="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
-		sudo ctr -n k8s.io images list 'name==$(PROCESSOR_NODE_IMAGE)')"; \
-	actual_manifest="$$(printf '%s\n' "$$image_table" | \
-		awk -v image='$(PROCESSOR_NODE_IMAGE)' 'NR > 1 && $$1 == image { print $$3; exit }')"; \
-	if [ "$$actual_manifest" != "$(EXPECTED_PROCESSOR_MANIFEST_DIGEST)" ]; then \
-		echo "log-processor 节点镜像 manifest 不匹配：实际 $${actual_manifest:-缺失}，要求 $(EXPECTED_PROCESSOR_MANIFEST_DIGEST)"; \
+	@$(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
+		sudo crictl inspecti '$(PROCESSOR_NODE_IMAGE)' >/dev/null 2>&1 || { \
+		echo "Minikube 节点缺少 log-processor 镜像：$(PROCESSOR_NODE_IMAGE)"; \
 		exit 1; \
-	fi; \
-	actual_config="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
-		sudo crictl inspecti -o go-template --template '{{.status.id}}' \
-		'$(PROCESSOR_NODE_IMAGE)')"; \
-	actual_config="$$(printf '%s' "$$actual_config" | tr -d '\r')"; \
-	if [ "$$actual_config" != "$(EXPECTED_PROCESSOR_CONFIG_DIGEST)" ]; then \
-		echo "log-processor 节点镜像 config 不匹配：实际 $${actual_config:-缺失}，要求 $(EXPECTED_PROCESSOR_CONFIG_DIGEST)"; \
-		exit 1; \
-	fi; \
-	echo "log-processor 节点镜像身份通过：manifest=$$actual_manifest config=$$actual_config"
+	}
+	@echo "log-processor 节点镜像已就绪：$(PROCESSOR_NODE_IMAGE)"
 
-# k8s-processor-runtime-check 确认唯一处理器 Pod 使用预期 config 摘要。
+# k8s-processor-runtime-check 确认唯一处理器 Pod 使用本地 dev 镜像并已经就绪。
 k8s-processor-runtime-check: k8s-context-check
 	@pod_count="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
 		-n $(KUBE_NAMESPACE) \
@@ -266,16 +247,25 @@ k8s-processor-runtime-check: k8s-context-check
 		echo "log-processor Pod 数量为 $$pod_count，要求 1"; \
 		exit 1; \
 	fi; \
-	runtime_image_id="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
+	spec_image="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
 		-n $(KUBE_NAMESPACE) \
 		-l app.kubernetes.io/name=log-processor \
-		-o 'jsonpath={.items[0].status.containerStatuses[?(@.name=="log-processor")].imageID}')"; \
-	actual_config="$${runtime_image_id##*@}"; \
-	if [ "$$actual_config" != "$(EXPECTED_PROCESSOR_CONFIG_DIGEST)" ]; then \
-		echo "log-processor Pod 镜像不匹配：实际 $${actual_config:-缺失}，要求 $(EXPECTED_PROCESSOR_CONFIG_DIGEST)"; \
+		-o 'jsonpath={.items[0].spec.containers[?(@.name=="log-processor")].image}')"; \
+	if [ "$$spec_image" != "$(PROCESSOR_NODE_IMAGE)" ]; then \
+		echo "log-processor Pod 镜像版本异常：实际 $${spec_image:-缺失}，要求 $(PROCESSOR_NODE_IMAGE)"; \
 		exit 1; \
 	fi; \
-	echo "log-processor Pod 运行时镜像身份通过：config=$$actual_config"
+	runtime_facts="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
+		-n $(KUBE_NAMESPACE) \
+		-l app.kubernetes.io/name=log-processor \
+		-o 'jsonpath={.items[0].status.containerStatuses[?(@.name=="log-processor")].imageID}{"|"}{.items[0].status.containerStatuses[?(@.name=="log-processor")].ready}')"; \
+	runtime_image_id="$${runtime_facts%%|*}"; \
+	runtime_ready="$${runtime_facts##*|}"; \
+	if [ -z "$$runtime_image_id" ] || [ "$$runtime_ready" != "true" ]; then \
+		echo "log-processor Pod 尚未使用本地镜像就绪：$${runtime_facts:-缺失}"; \
+		exit 1; \
+	fi; \
+	echo "log-processor Pod 镜像版本通过：$(PROCESSOR_NODE_IMAGE)"
 
 # k8s-processor-acceptance 验证部署幂等、SIGTERM 就绪撤销和消费者组续读。
 k8s-processor-acceptance: k8s-processor-image-check k8s-processor-runtime-check
@@ -288,12 +278,31 @@ perf: k8s-processor-image-check k8s-processor-runtime-check
 		THROUGHPUT_TIMEOUT_SECONDS='$(THROUGHPUT_TIMEOUT_SECONDS)' \
 		scripts/run-throughput-acceptance.sh
 
-# k8s-deploy 通过准入和节点镜像门禁后部署应用，并等待处理器真实就绪。
+# k8s-deploy 通过准入和镜像存在性检查后部署应用，并重启 Pod 使用最新本地构建。
 k8s-deploy: k8s-validate k8s-processor-image-check
 	$(KUBECTL) \
 		--context=$(KUBE_CONTEXT) \
 		apply \
 		-k $(KUSTOMIZE_OVERLAY)
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		rollout restart \
+		deployment/api-service \
+		deployment/worker-service \
+		deployment/log-processor \
+		-n $(KUBE_NAMESPACE)
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		rollout status \
+		deployment/api-service \
+		-n $(KUBE_NAMESPACE) \
+		--timeout=$(PROCESSOR_ROLLOUT_TIMEOUT)
+	$(KUBECTL) \
+		--context=$(KUBE_CONTEXT) \
+		rollout status \
+		deployment/worker-service \
+		-n $(KUBE_NAMESPACE) \
+		--timeout=$(PROCESSOR_ROLLOUT_TIMEOUT)
 	$(KUBECTL) \
 		--context=$(KUBE_CONTEXT) \
 		rollout status \
@@ -322,15 +331,15 @@ k8s-kafka-validate: k8s-context-check
 		--dry-run=server \
 		-k $(KUSTOMIZE_KAFKA_OVERLAY)
 
-# k8s-kafka-image-check 在写集群前校验 Minikube 节点内标签实际指向的摘要。
+# k8s-kafka-image-check 确认明确版本的 Kafka 镜像已经旁加载。
 k8s-kafka-image-check: k8s-context-check
 	@scripts/verify-kafka-image.sh node
 
-# k8s-kafka-runtime-check 确认主容器和初始化容器都使用预期 config digest。
+# k8s-kafka-runtime-check 确认主容器和初始化容器使用 Kafka 4.3.1。
 k8s-kafka-runtime-check: k8s-context-check
 	@scripts/verify-kafka-image.sh pod
 
-# k8s-kafka-deploy 与应用部署解耦，并在应用前后分别验证镜像身份。
+# k8s-kafka-deploy 与应用部署解耦，并在应用前后核对明确版本。
 k8s-kafka-deploy: k8s-kafka-validate k8s-kafka-image-check
 	$(KUBECTL) \
 		--context=$(KUBE_CONTEXT) \
@@ -384,11 +393,11 @@ k8s-elasticsearch-validate: k8s-context-check
 		--dry-run=server \
 		-k $(KUSTOMIZE_ELASTICSEARCH_OVERLAY)
 
-# k8s-elasticsearch-image-check 在部署前校验节点内旁加载镜像的实际摘要。
+# k8s-elasticsearch-image-check 确认明确版本的 Elasticsearch 镜像已经旁加载。
 k8s-elasticsearch-image-check: k8s-context-check
 	@scripts/verify-elasticsearch-image.sh node
 
-# k8s-elasticsearch-runtime-check 核对主容器和配置初始化容器的运行时 imageID。
+# k8s-elasticsearch-runtime-check 核对主容器和配置初始化容器的镜像版本。
 k8s-elasticsearch-runtime-check: k8s-context-check
 	@scripts/verify-elasticsearch-image.sh pod
 
@@ -448,27 +457,16 @@ k8s-grafana-validate: k8s-context-check
 		--dry-run=server \
 		-k $(KUSTOMIZE_GRAFANA_OVERLAY)
 
-# k8s-grafana-image-check 在部署前核对旁加载标签对应的节点 manifest 和 config。
+# k8s-grafana-image-check 确认明确版本的 Grafana 镜像已经旁加载。
 k8s-grafana-image-check: k8s-context-check
-	@image_table="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
-		sudo ctr -n k8s.io images list 'name==$(GRAFANA_NODE_IMAGE)')"; \
-	actual_manifest="$$(printf '%s\n' "$$image_table" | \
-		awk -v image='$(GRAFANA_NODE_IMAGE)' 'NR > 1 && $$1 == image { print $$3; exit }')"; \
-	if [ "$$actual_manifest" != "$(EXPECTED_GRAFANA_MANIFEST_DIGEST)" ]; then \
-		echo "Grafana 节点镜像 manifest 不匹配：实际 $${actual_manifest:-缺失}，要求 $(EXPECTED_GRAFANA_MANIFEST_DIGEST)"; \
+	@$(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
+		sudo crictl inspecti '$(GRAFANA_NODE_IMAGE)' >/dev/null 2>&1 || { \
+		echo "Minikube 节点缺少 Grafana 镜像：$(GRAFANA_NODE_IMAGE)"; \
 		exit 1; \
-	fi; \
-	actual_config="$$($(MINIKUBE) ssh -p $(KUBE_CONTEXT) -- \
-		sudo crictl inspecti -o go-template --template '{{.status.id}}' \
-		'$(GRAFANA_NODE_IMAGE)')"; \
-	actual_config="$$(printf '%s' "$$actual_config" | tr -d '\r')"; \
-	if [ "$$actual_config" != "$(EXPECTED_GRAFANA_CONFIG_DIGEST)" ]; then \
-		echo "Grafana 节点镜像 config 不匹配：实际 $${actual_config:-缺失}，要求 $(EXPECTED_GRAFANA_CONFIG_DIGEST)"; \
-		exit 1; \
-	fi; \
-	echo "Grafana 节点镜像身份通过：manifest=$$actual_manifest config=$$actual_config"
+	}
+	@echo "Grafana 节点镜像已就绪：$(GRAFANA_NODE_IMAGE)"
 
-# k8s-grafana-runtime-check 同时核对本地声明标签和容器运行时 config 摘要。
+# k8s-grafana-runtime-check 核对 Pod 声明版本和就绪状态。
 k8s-grafana-runtime-check: k8s-context-check
 	@pod_count="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
 		-n $(KUBE_NAMESPACE) \
@@ -485,16 +483,17 @@ k8s-grafana-runtime-check: k8s-context-check
 		echo "Grafana 声明镜像不匹配：实际 $${spec_image:-缺失}，要求 $(GRAFANA_NODE_IMAGE)"; \
 		exit 1; \
 	fi; \
-	runtime_image_id="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
+	runtime_facts="$$($(KUBECTL) --context=$(KUBE_CONTEXT) get pods \
 		-n $(KUBE_NAMESPACE) \
 		-l app.kubernetes.io/name=grafana \
-		-o 'jsonpath={.items[0].status.containerStatuses[?(@.name=="grafana")].imageID}')"; \
-	runtime_digest="$${runtime_image_id##*@}"; \
-	if [ "$$runtime_digest" != "$(EXPECTED_GRAFANA_CONFIG_DIGEST)" ]; then \
-		echo "Grafana Pod 镜像不匹配：实际 $${runtime_digest:-缺失}，要求 $(EXPECTED_GRAFANA_CONFIG_DIGEST)"; \
+		-o 'jsonpath={.items[0].status.containerStatuses[?(@.name=="grafana")].imageID}{"|"}{.items[0].status.containerStatuses[?(@.name=="grafana")].ready}')"; \
+	runtime_image_id="$${runtime_facts%%|*}"; \
+	runtime_ready="$${runtime_facts##*|}"; \
+	if [ -z "$$runtime_image_id" ] || [ "$$runtime_ready" != "true" ]; then \
+		echo "Grafana Pod 尚未使用该版本镜像就绪：$${runtime_facts:-缺失}"; \
 		exit 1; \
 	fi; \
-	echo "Grafana Pod 镜像身份通过：digest=$$runtime_digest"
+	echo "Grafana Pod 镜像版本通过：$(GRAFANA_NODE_IMAGE)"
 
 k8s-grafana-deploy: k8s-grafana-validate k8s-grafana-image-check
 	$(KUBECTL) \
@@ -533,11 +532,11 @@ k8s-filebeat-render:
 k8s-filebeat-validate: k8s-context-check
 	@scripts/run-filebeat-deployment.sh validate
 
-# k8s-filebeat-image-check 在部署前读取节点实际 manifest/config 摘要。
+# k8s-filebeat-image-check 确认明确版本的 Filebeat 镜像已经旁加载。
 k8s-filebeat-image-check: k8s-context-check
 	@scripts/verify-filebeat-image.sh node
 
-# k8s-filebeat-runtime-check 核对全部 DaemonSet Pod 的运行时 imageID。
+# k8s-filebeat-runtime-check 核对全部 DaemonSet Pod 的镜像版本和就绪状态。
 k8s-filebeat-runtime-check: k8s-context-check
 	@scripts/verify-filebeat-image.sh pod
 

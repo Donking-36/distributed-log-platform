@@ -32,7 +32,7 @@ spec:
       automountServiceAccountToken: true
       enableServiceLinks: false
       terminationGracePeriodSeconds: 30
-      # 当前镜像身份只对 linux/amd64 完成摘要验证，禁止调度到未验收的平台。
+      # 当前 Filebeat 镜像只验证 linux/amd64，禁止调度到其他平台。
       nodeSelector:
         kubernetes.io/os: linux
         kubernetes.io/arch: amd64
