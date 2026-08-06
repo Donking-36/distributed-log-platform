@@ -370,7 +370,9 @@ func TestNewDeadLetterHandlerValidatesDependenciesAndTimeouts(t *testing.T) {
 	}
 
 	handler := newTestDeadLetterHandler(t, valid, writer, committer)
-	result, err := handler.Handle(nil, validKafkaRecord(), DeliveryResult{}, nil)
+	// nil context 是本测试要覆盖的非法输入，显式类型变量用于区分生产调用。
+	var nilContext context.Context
+	result, err := handler.Handle(nilContext, validKafkaRecord(), DeliveryResult{}, nil)
 	if err == nil || result.Published || result.Committed {
 		t.Fatalf("Handle(nil) = %#v/%v，期望失败", result, err)
 	}
@@ -445,7 +447,7 @@ func (writer *fakeDeadLetterWriter) Write(ctx context.Context, key, value []byte
 	writer.value = append([]byte(nil), value...)
 	deadline, hasDeadline := ctx.Deadline()
 	writer.sawDeadline = hasDeadline
-	writer.deadlineBudget = deadline.Sub(time.Now())
+	writer.deadlineBudget = time.Until(deadline)
 	if writer.order != nil {
 		*writer.order = append(*writer.order, "publish")
 	}
