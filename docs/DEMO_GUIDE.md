@@ -1,9 +1,8 @@
 # 跨机器部署与演示指南
 
 本文用于在另一台 Windows 电脑上，从空的 WSL2/Minikube 环境恢复并演示
-`distributed-log-platform`。推荐先在当前电脑导出已经验证的六个镜像，再把镜像包
-和仓库一起复制到新电脑；这样不需要重新构建历史固定标签，也不依赖演示现场访问
-Docker Hub。
+`distributed-log-platform`。默认流程是在新电脑克隆仓库、重新构建两个自研镜像，
+再拉取并旁加载明确版本的第三方镜像；不依赖原电脑生成的镜像摘要。
 
 本文只覆盖本地教学演示，不把单节点 Minikube 当作生产高可用环境。
 
@@ -32,8 +31,8 @@ api-service / worker-service
 
 ## 2. 已验证版本与资源
 
-推荐尽量保持下列版本，特别是 Minikube、Kubernetes 和容器运行时版本。镜像旁加载
-后的 manifest 可能受运行时版本影响，版本差异过大可能触发仓库的镜像身份门禁。
+推荐尽量保持下列版本，特别是 Go、Minikube 和 Kubernetes。部署流程不比较不同
+机器旁加载后产生的 manifest/config 摘要。
 
 | 项目 | 已验证值 |
 |---|---|
@@ -49,14 +48,14 @@ api-service / worker-service
 
 建议新电脑至少具备：
 
-- x86-64 处理器；ARM 电脑不能直接使用本文导出的 amd64 镜像包；
+- x86-64 处理器；当前 Filebeat 配置和本地验收按 amd64 验证；
 - 16 GiB 物理内存；
 - WSL 可用内存不少于 7 GiB；
 - 至少 15 GiB 可用磁盘空间；六个镜像展开后约 5.3 GiB，Minikube、PVC 和日志还会
   继续占用空间；
 - 演示期间关闭大型 IDE、虚拟机和其他高内存容器。
 
-## 3. 在当前电脑准备迁移包
+## 3. 可选：在当前电脑准备离线迁移包
 
 ### 3.1 确认仓库和镜像
 
@@ -67,10 +66,12 @@ cd ~/projects/distributed-log-platform
 git switch develop
 git pull --ff-only
 git status --short --branch
+make image
+make processor-image
 
 docker image inspect \
-  distributed-log-platform/log-producer:d20fc7f \
-  distributed-log-platform/log-processor:84073f7 \
+  distributed-log-platform/log-producer:dev \
+  distributed-log-platform/log-processor:dev \
   apache/kafka:4.3.1 \
   docker.elastic.co/beats/filebeat-wolfi:9.4.4 \
   elasticsearch:9.4.4 \
@@ -93,8 +94,8 @@ git bundle create \
 
 docker save \
   --output ~/stage3-demo-transfer/stage3-images.tar \
-  distributed-log-platform/log-producer:d20fc7f \
-  distributed-log-platform/log-processor:84073f7 \
+  distributed-log-platform/log-producer:dev \
+  distributed-log-platform/log-processor:dev \
   apache/kafka:4.3.1 \
   docker.elastic.co/beats/filebeat-wolfi:9.4.4 \
   elasticsearch:9.4.4 \
@@ -121,8 +122,7 @@ ls -lh
 将整个 `stage3-demo-transfer` 目录复制到移动硬盘或安全的文件传输位置。镜像包超过
 4 GiB 时，目标磁盘不要使用 FAT32；使用 NTFS 或 exFAT。
 
-如果新电脑能够稳定访问 GitHub，也可以不复制 Git bundle，直接克隆远端仓库；
-镜像包仍建议复制。
+如果新电脑能够访问 GitHub 和镜像仓库，整个第 3 节都可以跳过。
 
 ## 4. 在新电脑安装基础环境
 
@@ -144,16 +144,17 @@ wsl --list --verbose
 如果 Ubuntu 的 `VERSION` 不是 `2`，按照微软 WSL 文档调整。官方说明见
 [安装 WSL](https://learn.microsoft.com/windows/wsl/install)。
 
-### 4.2 Docker Desktop
+### 4.2 WSL 内 Docker Engine
 
-安装 Docker Desktop，选择 WSL2 backend，并在 Docker Desktop 的 WSL Integration
-中启用 Ubuntu 24.04。官方步骤见
-[Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/)
-和 [Docker Desktop WSL2](https://docs.docker.com/desktop/features/wsl/use-wsl/)。
-
-打开 Ubuntu，验证 Linux 容器引擎：
+Docker Engine 直接安装并运行在 Ubuntu WSL 内，不依赖 Windows 侧容器程序。
+安装方式见 [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)。
+安装后启动服务并验证：
 
 ```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+
+# 重新打开一个 Ubuntu 终端后执行。
 docker version
 docker info --format 'architecture={{.Architecture}} cpus={{.NCPU}} memory={{.MemTotal}}'
 ```
@@ -281,7 +282,7 @@ make check
 应通过 Go 版本、格式、Shell 语法、Python 单测、`go vet`、Go 单测和构建。未复制
 模块缓存时，首次检查需要联网下载 `go.mod` 中固定的依赖。
 
-## 6. 导入固定镜像
+## 6. 可选：导入离线镜像
 
 先验证传输文件没有损坏：
 
@@ -291,12 +292,12 @@ sha256sum --check SHA256SUMS
 docker load --input stage3-images.tar
 ```
 
-确认六个固定标签：
+确认六个明确标签：
 
 ```bash
 docker image inspect \
-  distributed-log-platform/log-producer:d20fc7f \
-  distributed-log-platform/log-processor:84073f7 \
+  distributed-log-platform/log-producer:dev \
+  distributed-log-platform/log-processor:dev \
   apache/kafka:4.3.1 \
   docker.elastic.co/beats/filebeat-wolfi:9.4.4 \
   elasticsearch:9.4.4 \
@@ -347,42 +348,16 @@ docker exec stage3-logs cat /sys/fs/cgroup/cpu.max
 如果 Minikube 报内存不足，先执行 `free -h`。WSL 可用内存不足 7 GiB 时，应先增加
 WSL 内存并重启 WSL，不要把 Minikube 内存降到 6 GiB 以下后继续宣称环境一致。
 
-## 8. 将镜像旁加载到 Minikube
-
-```bash
-minikube image load -p stage3-logs --daemon=true \
-  distributed-log-platform/log-producer:d20fc7f
-
-minikube image load -p stage3-logs --daemon=true \
-  distributed-log-platform/log-processor:84073f7
-
-minikube image load -p stage3-logs --daemon=true \
-  apache/kafka:4.3.1
-
-minikube image load -p stage3-logs --daemon=true \
-  docker.elastic.co/beats/filebeat-wolfi:9.4.4
-
-minikube image load -p stage3-logs --daemon=true \
-  elasticsearch:9.4.4
-
-minikube image load -p stage3-logs --daemon=true \
-  grafana/grafana:13.1.0
-```
-
-执行部署前镜像门禁：
+## 8. 构建并旁加载镜像
 
 ```bash
 cd ~/projects/distributed-log-platform
-make k8s-kafka-image-check
-make k8s-elasticsearch-image-check
-make k8s-filebeat-image-check
-make k8s-grafana-image-check
-make k8s-processor-image-check
+make k8s-images
 ```
 
-全部通过后才能继续。如果只出现节点 manifest 摘要不匹配，不要直接修改 Makefile
-或跳过门禁；先确认新电脑使用 x86-64、Minikube v1.38.1、Kubernetes v1.35.1 和
-containerd 2.2.1，然后重新旁加载。配置摘要也不一致通常表示导入了错误镜像。
+该目标在新电脑构建 `log-producer:dev` 和 `log-processor:dev`，准备四个第三方
+明确版本，并覆盖加载到 `stage3-logs`。重复执行会复用 Docker 缓存。完全离线且已
+执行第 6 节 `docker load` 时，改用 `make k8s-load-images`，只加载已有镜像。
 
 ## 9. 从空集群部署完整平台
 
@@ -403,7 +378,7 @@ make k8s-filebeat-deploy
 make k8s-grafana-deploy
 ```
 
-这些入口会执行服务端 dry-run、等待 rollout，并在适用位置核对运行时镜像身份。
+这些入口会执行服务端 dry-run、等待 rollout，并核对声明版本和 Pod 就绪状态。
 首次启动 Elasticsearch 可能需要几分钟。
 
 ## 10. 部署后检查
@@ -581,7 +556,7 @@ minikube logs -p stage3-logs --problems
 docker inspect stage3-logs --format '{{.State.Status}} {{.HostConfig.Memory}}'
 ```
 
-常见原因是 Docker Desktop 未启动、WSL 集成未开启、内存不足或虚拟化未启用。
+常见原因是 WSL 内 Docker Engine 未启动、内存不足或虚拟化未启用。
 
 ### 12.3 Pod 为 `ImagePullBackOff` 或 `ErrImageNeverPull`
 
@@ -593,7 +568,7 @@ kubectl --context=stage3-logs describe pod \
   -n stage3-logs <POD名称>
 ```
 
-重新执行对应的 `minikube image load --daemon=true`。本地 overlay 使用
+重新执行 `make k8s-load-images`。本地 overlay 使用
 `imagePullPolicy: Never`，因此节点里没有镜像时 Kubernetes 不会联网补救。
 
 ### 12.4 Pod 不就绪或反复重启

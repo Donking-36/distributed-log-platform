@@ -12,7 +12,6 @@ readonly EXPECTED_TOPICS=(
   "logs.dlq"
 )
 readonly EXPECTED_PARTITIONS=(3 3 1 1)
-readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 
 KUBECTL="${KUBECTL:-kubectl}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-stage3-logs}"
@@ -20,7 +19,6 @@ KUBE_NAMESPACE="${KUBE_NAMESPACE:-stage3-logs}"
 KUSTOMIZE_KAFKA_TOPICS_OVERLAY="${KUSTOMIZE_KAFKA_TOPICS_OVERLAY:-deploy/kubernetes/overlays/local-kafka-topics}"
 KAFKA_TOPIC_INIT_TIMEOUT="${KAFKA_TOPIC_INIT_TIMEOUT:-300s}"
 KAFKA_NODE_IMAGE="${KAFKA_NODE_IMAGE:-docker.io/apache/kafka:4.3.1}"
-EXPECTED_KAFKA_CONFIG_DIGEST="${EXPECTED_KAFKA_CONFIG_DIGEST:-}"
 readonly EXPECTED_JOB_IMAGE="${KAFKA_NODE_IMAGE#docker.io/}"
 
 fail() {
@@ -30,8 +28,6 @@ fail() {
 
 [[ "${MODE}" == "validate" || "${MODE}" == "run" ]] ||
   fail "用法：$0 validate|run"
-[[ "${EXPECTED_KAFKA_CONFIG_DIGEST}" =~ ${DIGEST_PATTERN} ]] ||
-  fail "EXPECTED_KAFKA_CONFIG_DIGEST 必须是完整的 sha256 摘要"
 [[ "${KAFKA_TOPIC_INIT_TIMEOUT}" =~ ^([1-9][0-9]*)s$ ]] ||
   fail "KAFKA_TOPIC_INIT_TIMEOUT 必须是正整数秒，例如 300s"
 readonly TIMEOUT_SECONDS="${BASH_REMATCH[1]}"
@@ -139,14 +135,6 @@ init_container_names="$(${KUBECTL} \
   -o 'jsonpath={range .spec.template.spec.initContainers[*]}{.name}{"\n"}{end}')"
 [[ -z "${init_container_names}" ]] ||
   fail "主题初始化 Job 不允许包含 initContainer：${init_container_names}"
-annotated_config_digest="$(${KUBECTL} \
-  create \
-  --dry-run=client \
-  -f "${job_file}" \
-  -o 'jsonpath={.spec.template.metadata.annotations.distributed-log-platform\.io/expected-config-digest}')"
-[[ "${annotated_config_digest}" == "${EXPECTED_KAFKA_CONFIG_DIGEST}" ]] ||
-  fail "主题初始化 Job 的镜像摘要注解不匹配：${annotated_config_digest:-缺失}"
-
 "${KUBECTL}" \
   --context="${KUBE_CONTEXT}" \
   apply \
@@ -212,7 +200,7 @@ if [[ -n "${existing}" ]]; then
     -o 'jsonpath={.metadata.uid}')"
 fi
 
-# Runner 自身在任何写操作前复用节点摘要门禁，不能依赖 Make 前置目标兜底。
+# Runner 自身在任何写操作前确认明确版本的镜像已经旁加载。
 "${repo_root}/scripts/verify-kafka-image.sh" node
 
 # 新 ConfigMap 与旧终态 Job 可以并存；先写入脚本可避免删除证据后才发现写入失败。
@@ -309,11 +297,7 @@ pod_status="$(${KUBECTL} \
 IFS='|' read -r phase restart_count runtime_image_id exit_code <<<"${pod_status}"
 [[ "${phase}" == "Succeeded" && "${restart_count}" == "0" && "${exit_code}" == "0" ]] ||
   fail "Job Pod 状态异常：phase=${phase} restarts=${restart_count} exit=${exit_code}"
-[[ "${runtime_image_id}" =~ (sha256:[0-9a-f]{64})$ ]] ||
-  fail "无法解析 Job Pod 的运行时 imageID：${runtime_image_id:-缺失}"
-actual_config_digest="${BASH_REMATCH[1]}"
-[[ "${actual_config_digest}" == "${EXPECTED_KAFKA_CONFIG_DIGEST}" ]] ||
-  fail "Job Pod 镜像不匹配：实际 ${actual_config_digest}，要求 ${EXPECTED_KAFKA_CONFIG_DIGEST}"
+[[ -n "${runtime_image_id}" ]] || fail "Job Pod 缺少运行时 imageID"
 
 "${KUBECTL}" \
   --context="${KUBE_CONTEXT}" \
@@ -347,4 +331,4 @@ for index in "${!EXPECTED_TOPICS[@]}"; do
 done
 
 printf '%s\n' "${verified_lines[@]}"
-echo "Kafka 主题初始化通过：单 Pod、0 重启、镜像身份匹配、4 个主题严格验证"
+echo "Kafka 主题初始化通过：单 Pod、0 重启、镜像版本匹配、4 个主题严格验证"

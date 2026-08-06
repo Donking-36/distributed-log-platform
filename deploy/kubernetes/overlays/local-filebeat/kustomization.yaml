@@ -26,13 +26,6 @@ patches:
         namespace: stage3-collector
       spec:
         template:
-          metadata:
-            annotations:
-              # Docker→containerd 旁加载会转换 manifest；四类摘要共同构成本地证据。
-              distributed-log-platform.io/upstream-index-digest: sha256:e323c1c7c3bec7ea979cef3827f53ff2d576e1d3020e5d56cb9e40d6b49c48ca
-              distributed-log-platform.io/upstream-amd64-digest: sha256:3d14aa62612275ffae45891e523e9b29f23eb647032809190eb60f6b4a549379
-              distributed-log-platform.io/expected-config-digest: sha256:fa7ab9fc5ce34d22947367ce44f7e4091cfca1fa3f39a2acfd97bceede6646bf
-              distributed-log-platform.io/local-import-digest: sha256:a700abba5534b71456b1e6fb44c40f5ac7582ec1a9c2f458a672cbf98bea1eb9
           spec:
             containers:
               - name: filebeat

@@ -1,8 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
-# minikube image load 按标签注册镜像；Make 在部署前后核对实际 manifest/config 摘要。
+# 本地开发镜像在目标机器重新构建并旁加载，不绑定历史提交或原机器摘要。
 images:
   - name: distributed-log-platform/log-processor
     newName: docker.io/distributed-log-platform/log-processor
-    newTag: 84073f7
+    newTag: dev

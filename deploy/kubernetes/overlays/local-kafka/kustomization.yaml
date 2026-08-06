@@ -7,13 +7,13 @@ resources:
   - ../../base/namespace
   - ../../base/kafka
 
-# 主容器与初始化容器必须使用同一个已旁加载标签；摘要身份由部署门禁强制校验。
+# 主容器与初始化容器使用同一个明确版本的本地旁加载镜像。
 images:
   - name: apache/kafka
     newName: apache/kafka
     newTag: 4.3.1
 
-# Minikube 节点为 linux/amd64，只运行已旁加载并核验过的平台镜像。
+# Minikube 节点只运行已旁加载的 Kafka 4.3.1 镜像。
 patches:
   - target:
       group: apps
@@ -27,13 +27,6 @@ patches:
         name: kafka
       spec:
         template:
-          metadata:
-            annotations:
-              # Docker daemon 旁加载会转换 manifest media type，需同时保存上游与本地证据。
-              distributed-log-platform.io/upstream-index-digest: sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
-              distributed-log-platform.io/upstream-amd64-digest: sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26
-              distributed-log-platform.io/expected-config-digest: sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11
-              distributed-log-platform.io/local-import-digest: sha256:f8f865a3222d807cf1e6c515ca447cb2fb604ddc57f0a007a02a9ce79bd7a511
           spec:
             initContainers:
               - name: prepare-config

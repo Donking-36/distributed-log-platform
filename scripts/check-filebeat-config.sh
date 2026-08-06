@@ -3,8 +3,6 @@ set -Eeuo pipefail
 
 DOCKER="${DOCKER:-docker}"
 FILEBEAT_LOCAL_IMAGE="${FILEBEAT_LOCAL_IMAGE:-docker.elastic.co/beats/filebeat-wolfi:9.4.4}"
-EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST="${EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST:-}"
-readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 
 fail() {
   echo "$1" >&2
@@ -17,14 +15,11 @@ config_file="${repo_root}/deploy/kubernetes/base/filebeat/filebeat.yml"
 
 command -v "${DOCKER}" >/dev/null 2>&1 || fail "缺少命令：${DOCKER}"
 [[ -f "${config_file}" ]] || fail "缺少 Filebeat 配置：${config_file}"
-[[ "${EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST}" =~ ${DIGEST_PATTERN} ]] ||
-  fail "EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST 必须是完整的 sha256 摘要"
-
 image_facts="$(${DOCKER} image inspect --platform linux/amd64 "${FILEBEAT_LOCAL_IMAGE}" \
-  --format '{{.Descriptor.digest}}|{{.Architecture}}|{{.Os}}')"
-expected_image_facts="${EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST}|amd64|linux"
+  --format '{{.Architecture}}|{{.Os}}')"
+expected_image_facts="amd64|linux"
 [[ "${image_facts}" == "${expected_image_facts}" ]] ||
-  fail "Filebeat Docker 配置校验镜像不匹配：实际 ${image_facts}，要求 ${expected_image_facts}"
+  fail "Filebeat 镜像平台不匹配：实际 ${image_facts}，要求 ${expected_image_facts}"
 
 umask 077
 work_dir="$(mktemp -d)"
@@ -66,4 +61,4 @@ fi
 grep -Fq "unknown/unsupported kafka version '4.3.1' accessing 'output.kafka.version'" \
   "${work_dir}/illegal-version.log" || fail "Filebeat Kafka 版本反例失败原因不匹配"
 
-echo "Filebeat 配置检查通过：镜像身份、基线/4.1.0 正例及 4.3.1 反例全部匹配"
+echo "Filebeat 配置检查通过：镜像平台、基线/4.1.0 正例及 4.3.1 反例全部匹配"

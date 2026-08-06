@@ -145,38 +145,27 @@ Service、StatefulSet 和运行配置，`base/kafka-topics` 保存一次性主�
 `base/filebeat` 与 `base/filebeat-metadata-access` 分别保存采集器和目标命名空间
 Pod-only RBAC；`base/elasticsearch` 保存单节点 StatefulSet、Service、PVC 契约
 和索引模板；`base/grafana` 保存日志数据源、仪表盘、Deployment 和 ClusterIP
-Service。应用及第三方组件的镜像身份由固定摘要或本地旁加载门禁约束。
+Service。第三方组件使用明确版本，自研组件由目标机器构建并旁加载 `dev` 镜像。
 持续应用、验收 Job、吞吐 Job、有状态 Kafka 与主题初始化分别使用 `overlays/local`、
 `overlays/local-acceptance`、`overlays/local-throughput`、`overlays/local-kafka`、`overlays/local-kafka-topics`、
 `overlays/local-filebeat`、`overlays/local-elasticsearch`、
 `overlays/local-grafana`，共享基础定义但独立运行，避免应用、采集、主题或搜索
 存储操作隐式改动其他组件、Namespace 或 PVC。
 
-本地 overlay 的 producer 固定为 `d20fc7f`，processor 固定为 `84073f7`。首次
-部署前，先确认两个镜像存在并旁加载到 Minikube：
+本地 overlay 的 producer 和 processor 都使用 `dev`。新机器首次部署时，一个
+目标即可构建两个自研镜像、拉取四个第三方镜像并加载到 Minikube：
 
 ```bash
-docker image inspect distributed-log-platform/log-producer:d20fc7f
-docker image inspect distributed-log-platform/log-processor:84073f7
-
-minikube image load \
-  -p stage3-logs \
-  distributed-log-platform/log-producer:d20fc7f
-minikube image load \
-  -p stage3-logs \
-  distributed-log-platform/log-processor:84073f7
-
+make k8s-images
 make k8s-render
 make k8s-validate
-make k8s-processor-image-check
 make k8s-deploy
 make k8s-status
 ```
 
-镜像必须从对应干净 Git 提交构建，不能用其他工作区内容冒充固定标签。
 `k8s-render` 只输出最终 YAML；`k8s-validate` 使用 API Server 做服务端 dry-run。
-`k8s-deploy` 会先核对 processor 标签在节点内实际对应的 manifest/config 摘要，
-应用后等待 Deployment Ready，再核对 Pod 运行时 config 摘要。
+`k8s-deploy` 只确认处理器镜像已经加载，应用后重启三个自研 Deployment，并等待
+它们使用最新本地构建就绪。不同机器导入镜像后产生的摘要不会写入仓库。
 
 processor 使用单副本 `Recreate`、30 秒终止宽限、startup/readiness/liveness HTTP
 探针、100m/128Mi 请求和 500m/256Mi 上限，并以 UID/GID 10001、只读根文件系统
@@ -223,8 +212,8 @@ Grafana 13.1.0 直接查询 Elasticsearch，不经过重复的 Go 查询接口�
 使用 `logs-stage3-*` 和 `@timestamp`；预置仪表盘包含日志明细、日志级别分布、
 ERROR/WARN 趋势、服务变量、关键词变量和时间范围。日志行可展开查看完整字段。
 
-本地节点无法稳定直接访问 Docker Hub 时，先由宿主拉取并旁加载固定标签；部署
-入口会在写入前核对节点 manifest/config，完成后再核对 Pod imageID：
+本地节点无法稳定直接访问 Docker Hub 时，先由宿主拉取并旁加载明确版本；部署
+入口只检查镜像存在、Pod 声明版本和就绪状态：
 
 ```bash
 docker pull docker.io/grafana/grafana:13.1.0
@@ -260,27 +249,19 @@ make k8s-grafana-acceptance \
 该入口使用共享工作流锁，在临时 `logs-stage3-*` 索引写入 16 条完整文档，验证
 两个服务、四个级别、两个时间窗口、固定错误关键词、无结果、明细与聚合数量
 一致，并重复测量一次三查询请求的 p50/p95。随后把 Grafana 缩到 0 删除 Pod 和
-临时 SQLite，再恢复单副本，验证新 Pod UID、镜像身份、数据源和仪表盘自动恢复。
+临时 SQLite，再恢复单副本，验证新 Pod UID、镜像版本、数据源和仪表盘自动恢复。
 退出时删除临时索引并复核 404，Deployment 声明与 overlay 必须无漂移。
 
 ### Kafka 单节点基线
 
-Kafka base 固定官方多架构索引摘要；本地 Minikube 使用按官方 amd64 摘要拉取、
-再旁加载的 `4.3.1` 标签和 `imagePullPolicy: Never`。Docker daemon 导入 containerd
-时会转换 manifest media type，因此 local overlay 同时记录上游索引、上游 amd64、
-镜像 config 和本地导入 manifest 四个摘要。标签和注解只用于引用与留证，部署
-门禁还会读取节点内的实际 manifest/config 摘要，并在滚动后核对初始化容器与
-主容器的 imageID：
+Kafka base 固定官方上游版本；本地 Minikube 使用旁加载的 `4.3.1` 标签和
+`imagePullPolicy: Never`。部署只确认该版本存在，并核对初始化容器和主容器都使用
+同一版本，不比较 Docker→containerd 转换产生的机器相关摘要：
 
 ```bash
-docker pull \
-  apache/kafka@sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26
-docker tag \
-  apache/kafka@sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26 \
-  apache/kafka:4.3.1
+docker pull apache/kafka:4.3.1
 minikube image load \
   -p stage3-logs \
-  --daemon=true \
   apache/kafka:4.3.1
 
 make k8s-kafka-render
@@ -339,9 +320,9 @@ make k8s-kafka-topics-status
 ```
 
 `k8s-kafka-topics-validate` 检查当前上下文、Broker `1/1`、客户端 Service、严格的
-“1 ConfigMap + 1 Job”资源边界、单容器镜像/拉取策略/摘要注解，再做服务端
+“1 ConfigMap + 1 Job”资源边界、单容器镜像版本和拉取策略，再做服务端
 dry-run，全程不写集群；
-`k8s-kafka-topics` 先复用节点镜像摘要门禁，再安全替换属于本流程且已经终止的
+`k8s-kafka-topics` 先确认 Kafka 4.3.1 已旁加载，再安全替换属于本流程且已经终止的
 同名 Job。缺失主题会被创建；已有主题的分区、副本、ISR、重分配状态或上述显式
 配置只要不一致就直接失败，不自动扩分区、重分配副本、修改保留期或删除主题。
 显式配置使用 `kafka-configs` 的动态主题配置输出验证，不把 Broker 继承值误写成
@@ -350,16 +331,11 @@ dry-run，全程不写集群；
 
 ### Elasticsearch 单节点基线
 
-Elasticsearch 使用 Elastic Team 维护的 Docker Official Image 9.4.4。base 固定
-多架构索引摘要，本地 overlay 使用已经旁加载的 linux/amd64 标签并保存上游索引、
-上游 amd64、节点 manifest 和 config 四层证据：
+Elasticsearch 使用 Elastic Team 维护的 Docker Official Image 9.4.4。本地 overlay
+使用已经旁加载的明确版本，不保存目标机器导入后的 manifest/config 摘要：
 
 ```bash
-docker pull \
-  docker.io/library/elasticsearch@sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c
-docker tag \
-  docker.io/library/elasticsearch@sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c \
-  docker.io/library/elasticsearch:9.4.4
+docker pull docker.io/library/elasticsearch:9.4.4
 minikube image load \
   -p stage3-logs \
   docker.io/library/elasticsearch:9.4.4
@@ -515,7 +491,8 @@ make vet
 make test
 make build
 make check
-make image IMAGE_TAG="$(git rev-parse --short HEAD)"
+make image
+make processor-image
 make k8s-render
 make k8s-validate
 make k8s-status
@@ -568,7 +545,7 @@ UID、PVC UID/PV 和 Cluster ID 保持，故障前位点连续可读并在恢复
 证据不外推为多节点高可用、任意长中断、队列容量或磁盘损坏恢复保证。
 
 Elasticsearch 9.4.4 已以单节点 StatefulSet 部署，5 GiB PVC、ClusterIP、
-Restricted 安全上下文、只读根、1 GiB 堆和镜像身份均已验证。索引模板的 14 个
+Restricted 安全上下文、只读根、1 GiB 堆和镜像版本均已验证。索引模板的 14 个
 字段类型、1 分片/0 副本以及 `dynamic: strict` 已生效。`internal/elasticsearch`
 现已使用官方 Go v9.4.2 客户端完成不可变的 14 字段文档转换、Bulk `create` 编码
 和逐项结果分类；真实 9.4.4 冒烟首次返回 `201/created`，同一 `_id` 重复写入返回

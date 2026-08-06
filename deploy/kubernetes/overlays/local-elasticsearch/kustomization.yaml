@@ -7,7 +7,7 @@ resources:
   - ../../base/namespace
   - ../../base/elasticsearch
 
-# Minikube 节点只运行已经旁加载并核验过的 linux/amd64 镜像。
+# Minikube 节点只运行已经旁加载的 Elasticsearch 9.4.4 镜像。
 images:
   - name: docker.io/library/elasticsearch
     newName: docker.io/library/elasticsearch
@@ -29,10 +29,6 @@ patches:
           metadata:
             annotations:
               distributed-log-platform.io/security-mode: disabled-local-development-only
-              distributed-log-platform.io/upstream-index-digest: sha256:7de2137b43d9f263cffe51f139a9f3144da7b9941de615fb4317fc539f4d16a7
-              distributed-log-platform.io/upstream-amd64-digest: sha256:c060ba28f5cfea4eedd8fb85bd5f6bf7d120e53040ee038a289c28979af7128c
-              distributed-log-platform.io/local-import-digest: sha256:d98bb271b34aaa8cb2d989673653eb275aa474cfa7f649c7665b845ce66b7677
-              distributed-log-platform.io/expected-config-digest: sha256:d3e5c642b3f9082731ab9e3a5d5d659728b29627ed806bf5fec20995a6077640
           spec:
             initContainers:
               - name: prepare-config

@@ -6,7 +6,7 @@ namespace: stage3-logs
 resources:
   - ../../base/kafka-topics
 
-# 本地 Job 只能运行已经旁加载并通过节点摘要门禁的 Kafka 4.3.1 镜像。
+# 本地 Job 使用已经旁加载的 Kafka 4.3.1 镜像。
 images:
   - name: apache/kafka
     newName: apache/kafka
@@ -25,13 +25,6 @@ patches:
         name: kafka-topic-initializer
       spec:
         template:
-          metadata:
-            annotations:
-              # 注解只保存证据；运行前后的镜像门禁才负责强制身份。
-              distributed-log-platform.io/upstream-index-digest: sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
-              distributed-log-platform.io/upstream-amd64-digest: sha256:ccd1314e47ec76909e01f86308b4dcf2064f19f7c89759234322314b0e319e26
-              distributed-log-platform.io/expected-config-digest: sha256:47dccc76b32761bc57462b8753144cdbb73a16b123b1d13d3eedb92bb7952b11
-              distributed-log-platform.io/local-import-digest: sha256:f8f865a3222d807cf1e6c515ca447cb2fb604ddc57f0a007a02a9ce79bd7a511
           spec:
             containers:
               - name: kafka-topic-initializer

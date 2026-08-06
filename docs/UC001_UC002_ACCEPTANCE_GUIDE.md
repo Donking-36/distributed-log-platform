@@ -105,7 +105,7 @@ make check
 
 - Go 版本不匹配：切换到 Go 1.26.5 后重试，不跳过版本门禁；
 - 工作区有改动：先确认改动来源，不要为了演示使用 `git reset --hard`；
-- 镜像摘要门禁失败：按照 `DEMO_GUIDE.md` 重新导入固定镜像，不使用 `latest`。
+- 镜像缺失：按照 `DEMO_GUIDE.md` 执行 `make k8s-images`，不要使用 `latest`。
 
 ### 2.3 确认全部组件就绪
 

@@ -7,7 +7,6 @@ readonly DAEMONSET_NAME="filebeat"
 readonly SERVICE_ACCOUNT_NAME="filebeat"
 readonly ROLE_NAME="filebeat-pod-metadata-reader"
 readonly CONTAINER_NAME="filebeat"
-readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 
 KUBECTL="${KUBECTL:-kubectl}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-stage3-logs}"
@@ -16,21 +15,10 @@ FILEBEAT_NAMESPACE="${FILEBEAT_NAMESPACE:-stage3-collector}"
 KUSTOMIZE_FILEBEAT_OVERLAY="${KUSTOMIZE_FILEBEAT_OVERLAY:-deploy/kubernetes/overlays/local-filebeat}"
 FILEBEAT_ROLLOUT_TIMEOUT="${FILEBEAT_ROLLOUT_TIMEOUT:-180s}"
 FILEBEAT_NODE_IMAGE="${FILEBEAT_NODE_IMAGE:-docker.elastic.co/beats/filebeat-wolfi:9.4.4}"
-EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST="${EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST:-}"
-EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST="${EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST:-}"
-EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST="${EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST:-}"
-EXPECTED_FILEBEAT_CONFIG_DIGEST="${EXPECTED_FILEBEAT_CONFIG_DIGEST:-}"
 
 fail() {
   echo "$1" >&2
   exit 1
-}
-
-require_digest() {
-  local name="$1"
-  local value="$2"
-
-  [[ "${value}" =~ ${DIGEST_PATTERN} ]] || fail "${name} 必须是完整的 sha256 摘要"
 }
 
 assert_line_count() {
@@ -47,10 +35,6 @@ assert_line_count() {
 [[ "${MODE}" == "validate" || "${MODE}" == "run" ]] || fail "用法：$0 validate|run"
 [[ "${FILEBEAT_ROLLOUT_TIMEOUT}" =~ ^([1-9][0-9]*)s$ ]] ||
   fail "FILEBEAT_ROLLOUT_TIMEOUT 必须是正整数秒，例如 180s"
-require_digest "EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST" "${EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST}"
-require_digest "EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST" "${EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST}"
-require_digest "EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST" "${EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST}"
-require_digest "EXPECTED_FILEBEAT_CONFIG_DIGEST" "${EXPECTED_FILEBEAT_CONFIG_DIGEST}"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
@@ -201,18 +185,6 @@ pod-logs|/var/log/pods|true
 tmp|/tmp|"
 [[ "${mounts}" == "${expected_mounts}" ]] || fail "Filebeat 挂载权限异常：${mounts}"
 
-for annotation in \
-  "upstream-index-digest|${EXPECTED_FILEBEAT_UPSTREAM_INDEX_DIGEST}" \
-  "upstream-amd64-digest|${EXPECTED_FILEBEAT_UPSTREAM_AMD64_DIGEST}" \
-  "local-import-digest|${EXPECTED_FILEBEAT_LOCAL_MANIFEST_DIGEST}" \
-  "expected-config-digest|${EXPECTED_FILEBEAT_CONFIG_DIGEST}"; do
-  IFS='|' read -r annotation_name expected_value <<<"${annotation}"
-  actual_value="$(${KUBECTL} create --dry-run=client -f "${daemonset_file}" \
-    -o "jsonpath={.spec.template.metadata.annotations.distributed-log-platform\\.io/${annotation_name}}")"
-  [[ "${actual_value}" == "${expected_value}" ]] ||
-    fail "Filebeat 摘要注解 ${annotation_name} 异常：${actual_value:-缺失}"
-done
-
 "${KUBECTL}" create --dry-run=client -f "${config_map_file}" \
   -o 'jsonpath={.data.filebeat\.yml}' >"${rendered_config}"
 cmp --silent deploy/kubernetes/base/filebeat/filebeat.yml "${rendered_config}" ||
@@ -280,7 +252,7 @@ source "${repo_root}/scripts/lib/filebeat-workflow-lock.sh"
 acquire_filebeat_workflow_lock || exit 1
 export FILEBEAT_WORKFLOW_LOCK_INHERITED=1
 
-# Runner 自身在任何集群写操作前执行节点镜像身份门禁。
+# Runner 自身在任何集群写操作前确认明确版本的镜像已经旁加载。
 "${repo_root}/scripts/verify-filebeat-image.sh" node
 
 assert_owned_or_absent() {

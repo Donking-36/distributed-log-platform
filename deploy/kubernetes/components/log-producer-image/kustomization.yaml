@@ -4,4 +4,4 @@ kind: Component
 # 持续 Deployment 与固定批次 Job 必须复用同一份已验证镜像。
 images:
   - name: distributed-log-platform/log-producer
-    newTag: d20fc7f
+    newTag: dev
