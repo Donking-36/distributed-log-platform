@@ -534,7 +534,7 @@ func (writer *fakeBulkWriter) CreateBatch(
 	writer.documentCount = len(documents)
 	deadline, hasDeadline := ctx.Deadline()
 	writer.sawDeadline = hasDeadline
-	writer.deadlineBudget = deadline.Sub(time.Now())
+	writer.deadlineBudget = time.Until(deadline)
 	if writer.order != nil {
 		*writer.order = append(*writer.order, "write")
 	}
@@ -567,7 +567,7 @@ func (committer *fakeRecordCommitter) Commit(
 	committer.records = append(committer.records, record)
 	deadline, hasDeadline := ctx.Deadline()
 	committer.sawDeadline = hasDeadline
-	committer.deadlineBudget = deadline.Sub(time.Now())
+	committer.deadlineBudget = time.Until(deadline)
 	if committer.order != nil {
 		*committer.order = append(*committer.order, "commit")
 	}

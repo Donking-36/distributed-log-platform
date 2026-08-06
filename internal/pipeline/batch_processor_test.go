@@ -201,7 +201,7 @@ func (committer *fakeBatchCommitter) CommitBatch(
 	committer.records = append([]kafka.Record(nil), records...)
 	deadline, hasDeadline := ctx.Deadline()
 	committer.sawDeadline = hasDeadline
-	committer.deadlineBudget = deadline.Sub(time.Now())
+	committer.deadlineBudget = time.Until(deadline)
 	if committer.waitForContext {
 		<-ctx.Done()
 		return ctx.Err()

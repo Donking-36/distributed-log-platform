@@ -637,7 +637,9 @@ func TestNewDeliveryCycleValidatesDependenciesAndContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDeliveryCycle() error = %v", err)
 	}
-	result, err := cycle.Deliver(nil, validKafkaRecord())
+	// nil context 是本测试要覆盖的非法输入，显式类型变量用于区分生产调用。
+	var nilContext context.Context
+	result, err := cycle.Deliver(nilContext, validKafkaRecord())
 	if err == nil || result.Attempts != 0 || result.LastResult.Kind != ResultSystemFailure {
 		t.Fatalf("Deliver(nil) = %#v/%v, want zero-attempt system failure", result, err)
 	}

@@ -107,14 +107,14 @@ func (handler *DeadLetterHandler) Handle(
 	if err != nil {
 		return DeadLetterResult{}, recordError(record, "编码死信记录", err)
 	}
-	key := []byte(fmt.Sprintf(
+	key := fmt.Appendf(nil,
 		"v%d|%d:%s|%d|%d",
 		deadLetterSchemaVersion,
 		len(record.Topic),
 		record.Topic,
 		record.Partition,
 		record.Offset,
-	))
+	)
 
 	publishContext, cancelPublish := context.WithTimeout(ctx, handler.config.PublishTimeout)
 	err = handler.writer.Write(publishContext, key, value)
