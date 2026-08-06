@@ -486,6 +486,8 @@ make k8s-acceptance
 
 ## 项目文档
 
+- [`docs/UC001_UC002_ACCEPTANCE_GUIDE.md`](docs/UC001_UC002_ACCEPTANCE_GUIDE.md)：
+  UC-001 与 UC-002 的现场验收步骤、预期结果、异常分支和通过清单。
 - [`docs/DEMO_GUIDE.md`](docs/DEMO_GUIDE.md)：在另一台 Windows/WSL2 电脑上迁移镜像、从空集群部署并完成现场演示。
 - [`docs/requirements.md`](docs/requirements.md)：UC-001/UC-002 的范围、日志契约和验收要求。
 - [`docs/architecture.md`](docs/architecture.md)：组件职责、部署拓扑和兼容性门禁。
